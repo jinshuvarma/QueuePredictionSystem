@@ -18,6 +18,10 @@ from predictor import forecast_all_counters, threshold_alert
 from recommender import generate_recommendations
 from audio_manager import AudioAnnouncer
 
+
+# ============================================================
+# PAGE / THEME
+# ============================================================
 st.set_page_config(
     page_title="VisionAI Queue Manager",
     page_icon="👁️",
@@ -65,6 +69,10 @@ FORECAST_STEPS = 20
 CROWD_THRESHOLD = 30
 AUDIO_COOLDOWN_SECONDS = 10
 
+
+# ============================================================
+# AUDIO
+# ============================================================
 @st.cache_resource
 def get_announcer():
     try:
@@ -79,6 +87,10 @@ announcer = get_announcer()
 if "last_audio_time" not in st.session_state:
     st.session_state.last_audio_time = datetime.min
 
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 st.sidebar.title("⚙️ System Controls")
 
 data_mode = st.sidebar.radio(
@@ -1054,6 +1066,13 @@ except Exception:
     pass
 
 
+# ============================================================
+# REFRESH
+# ============================================================
+# IMPORTANT:
+# Never force full-page st.rerun while WebRTC is active.
+# Full reruns can recreate the WebRTC component and cause
+# camera/UI flickering. Simulation can safely auto-refresh.
 if auto_refresh:
 
     if data_mode == "Simulation":
