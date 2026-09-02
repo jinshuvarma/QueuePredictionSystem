@@ -374,6 +374,8 @@ class CentroidTracker:
                                                               
                        
                                                               
+# ROI is defined in the original design coordinates and scaled to every
+# incoming camera frame, including mobile back-camera frames.
 CAMERA_ZONE = [
     (121, 472),
     (121, 4),
@@ -479,7 +481,7 @@ class BrowserCameraProcessor:
                     self.worker_busy = True
 
             if frame is None:
-                time.sleep(0.005)
+                time.sleep(0.01)
                 continue
 
             try:
@@ -1128,6 +1130,10 @@ if data_mode == "Live Camera":
             video_frame_callback=processor.process,
             media_stream_constraints={
                 "video": {
+                    # Prefer the phone BACK camera on mobile browsers.
+                    # "ideal" keeps the app usable on devices where the
+                    # environment camera is unavailable.
+                    "facingMode": {"ideal": "environment"},
                     "width": {
                         "ideal": 640,
                         "max": 640,
@@ -1196,6 +1202,7 @@ if data_mode == "Live Camera":
     st.markdown("---")
 
     live_metrics_placeholder = st.empty()
+    live_ids_placeholder = st.empty()
     live_forecast_placeholder = st.empty()
 
     @st.fragment(
@@ -1237,6 +1244,9 @@ if data_mode == "Live Camera":
                 processor.entry_ts.clear()
 
                                                    
+            st.session_state.live_forecasts = {}
+            st.session_state.live_forecast_ts = 0.0
+
             st.session_state.history_df = pd.DataFrame(
                 [live_row]
             )
@@ -1321,40 +1331,82 @@ if data_mode == "Live Camera":
                 )
             ]
         else:
-            # Forecast/recommendations may use history, but the CURRENT queue
-            # state shown to the evaluator must come directly from the latest
-            # vision frame. This prevents old history from making an empty
-            # camera look like people are still waiting.
-            _, forecasts, recommendations = calculate_analytics(history)
+            # The latest vision row is the SOURCE OF TRUTH for the current
+            # dashboard state. Forecast is still calculated from recent history,
+            # but alerts/recommendations are recalculated from the CURRENT state
+            # so they cannot remain stale when people enter/leave.
+            forecast_now = time.time()
+            last_forecast_ts = st.session_state.get("live_forecast_ts", 0.0)
+            forecasts = st.session_state.get("live_forecasts", {})
+
+            if not forecasts or forecast_now - last_forecast_ts >= 2.0:
+                _, forecasts, _ = calculate_analytics(history)
+                st.session_state.live_forecasts = forecasts
+                st.session_state.live_forecast_ts = forecast_now
 
             current_count = int(live_row.get("people_in_queue", 0))
-            current_arrivals = int(live_row.get("arrivals", 0))
-            current_served = int(live_row.get("served", 0))
             current_service = float(live_row.get("avg_service_time", 2.5))
 
+            # Real-time arrival rate: count arrivals recorded during the most
+            # recent 60 seconds instead of displaying the single-frame event
+            # count as "Arrivals/min".
+            arrival_rate = 0.0
+            if not history.empty and "timestamp" in history.columns:
+                ts = pd.to_datetime(history["timestamp"], errors="coerce")
+                valid = history.loc[ts.notna()].copy()
+                if not valid.empty:
+                    ts2 = pd.to_datetime(valid["timestamp"], errors="coerce")
+                    recent = valid[ts2 >= ts2.max() - pd.Timedelta(seconds=60)]
+                    arrival_rate = float(recent["arrivals"].sum())
+
             if current_count <= 0:
+                state_df = pd.DataFrame([{
+                    "counter_id": "Counter 1",
+                    "people_in_queue": 0,
+                    "arrival_rate_per_min": round(arrival_rate, 2),
+                    "avg_service_time_min": round(current_service, 2),
+                    "estimated_wait_min": 0.0,
+                }])
                 recommendations = [(
                     "normal",
                     "No human detected in the queue ROI."
                 )]
-                state_df = pd.DataFrame([{
-                    "counter_id": "Counter 1",
-                    "people_in_queue": 0,
-                    "arrival_rate_per_min": 0.0,
-                    "avg_service_time_min": 2.5,
-                    "estimated_wait_min": 0.0,
-                }])
             else:
                 state_df = pd.DataFrame([{
                     "counter_id": "Counter 1",
                     "people_in_queue": current_count,
-                    "arrival_rate_per_min": float(current_arrivals),
-                    "avg_service_time_min": current_service,
-                    "estimated_wait_min": current_count * current_service,
+                    "arrival_rate_per_min": round(arrival_rate, 2),
+                    "avg_service_time_min": round(current_service, 2),
+                    "estimated_wait_min": round(current_count * current_service, 2),
                 }])
+
+                # Recalculate forecast alerts + recommendations using the
+                # current real-time state.
+                forecast_alerts = {
+                    counter: threshold_alert(
+                        forecast, CROWD_THRESHOLD
+                    )
+                    for counter, forecast in forecasts.items()
+                }
+                recommendations = generate_recommendations(
+                    state_df,
+                    forecast_alerts,
+                )
 
         with live_metrics_placeholder.container():
             render_metrics(state_df)
+
+        with live_ids_placeholder.container():
+            with processor.lock:
+                current_live_ids = sorted(int(x) for x in processor.last_ids)
+            if current_live_ids:
+                st.caption(
+                    "CURRENT HUMAN IDs: " + ", ".join(
+                        f"HUMAN #{x}" for x in current_live_ids
+                    )
+                )
+            else:
+                st.caption("CURRENT HUMAN IDs: None")
 
         with live_state_placeholder.container():
             actual_queue_count = int(
