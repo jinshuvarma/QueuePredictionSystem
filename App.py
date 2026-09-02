@@ -21,9 +21,9 @@ from recommender import generate_recommendations
 from audio_manager import AudioAnnouncer
 
 
-
-
-
+# ============================================================
+# PAGE / THEME
+# ============================================================
 st.set_page_config(
     page_title="VisionAI Queue Manager",
     page_icon="👁️",
@@ -1461,45 +1461,84 @@ if data_mode == "Live Camera":
     )
     def live_dashboard():
 
-        with processor.lock:
-            live_row = dict(
-                processor.latest_row
-            )
-
-        live_df = pd.DataFrame(
-            [live_row]
+        # IMPORTANT: Live mode must show zero until the browser camera
+        # is actually started. Never reuse old/simulation values.
+        camera_is_on = bool(
+            rtc_ctx.state.playing
         )
 
-        if (
-            st.session_state.history_df.empty
-        ):
+        if not camera_is_on:
+            with processor.lock:
+                live_row = {
+                    "timestamp": datetime.now(),
+                    "counter_id": "Counter 1",
+                    "people_in_queue": 0,
+                    "arrivals": 0,
+                    "served": 0,
+                    "avg_service_time": 2.5,
+                }
 
-            st.session_state.history_df = (
-                live_df
+                # Reset stale detection state while camera is stopped.
+                processor.latest_row = dict(live_row)
+                processor.latest_output = None
+                processor.last_boxes = []
+                processor.last_centroids = []
+                processor.last_objects = {}
+                processor.confirmed_ids.clear()
+                processor.candidate_hits.clear()
+                processor.seen_ids.clear()
+                processor.entry_ts.clear()
+
+            # A stopped camera has no live history.
+            st.session_state.history_df = pd.DataFrame(
+                [live_row]
             )
 
         else:
+            with processor.lock:
+                live_row = dict(
+                    processor.latest_row
+                )
 
-            last_ts = (
-                st.session_state.history_df[
-                    "timestamp"
-                ].iloc[-1]
+            live_df = pd.DataFrame(
+                [live_row]
             )
 
+            # Do not accept the processor's initial placeholder as a
+            # meaningful historical observation. Once the camera is on,
+            # the first actual inference row will replace this state.
             if (
-                live_row["timestamp"]
-                != last_ts
+                st.session_state.history_df.empty
+                or (
+                    len(st.session_state.history_df) == 1
+                    and float(
+                        st.session_state.history_df.iloc[0][
+                            "people_in_queue"
+                        ]
+                    ) == 0
+                    and float(
+                        st.session_state.history_df.iloc[0][
+                            "arrivals"
+                        ]
+                    ) == 0
+                )
             ):
+                st.session_state.history_df = live_df
+            else:
+                last_ts = (
+                    st.session_state.history_df[
+                        "timestamp"
+                    ].iloc[-1]
+                )
 
-                st.session_state.history_df = (
-                    pd.concat(
+                if live_row["timestamp"] != last_ts:
+                    st.session_state.history_df = pd.concat(
                         [
                             st.session_state.history_df,
                             live_df,
                         ],
                         ignore_index=True,
                     )
-                )
 
         if len(
             st.session_state.history_df
@@ -1515,11 +1554,31 @@ if data_mode == "Live Camera":
             st.session_state.history_df
         )
 
-        state_df, forecasts, recommendations = (
-            calculate_analytics(
-                history
+        if not camera_is_on:
+            state_df = pd.DataFrame(
+                [{
+                    "counter_id": "Counter 1",
+                    "people_in_queue": 0,
+                    "arrival_rate_per_min": 0.0,
+                    "avg_service_time_min": 2.5,
+                    "estimated_wait_min": 0.0,
+                }]
             )
-        )
+            forecasts = {
+                "Counter 1": []
+            }
+            recommendations = [
+                (
+                    "normal",
+                    "Camera is off. Start the camera to begin live queue detection.",
+                )
+            ]
+        else:
+            state_df, forecasts, recommendations = (
+                calculate_analytics(
+                    history
+                )
+            )
 
         with live_metrics_placeholder.container():
             render_metrics(state_df)
