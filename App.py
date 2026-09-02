@@ -21,9 +21,9 @@ from recommender import generate_recommendations
 from audio_manager import AudioAnnouncer
 
 
-# ============================================================
-# PAGE / THEME
-# ============================================================
+
+
+
 st.set_page_config(
     page_title="VisionAI Queue Manager",
     page_icon="👁️",
@@ -381,6 +381,7 @@ class BrowserCameraProcessor:
         # accepted. This suppresses transient false detections on objects.
         self.candidate_hits = {}
         self.confirmed_ids = set()
+        self.confirmed_boxes = {}
 
         self.frame_counter = 0
 
@@ -454,13 +455,12 @@ class BrowserCameraProcessor:
             3,
         )
 
+        # Draw only confirmed humans that are actually inside the ROI.
         for box, centroid in zip(
             boxes,
             centroids,
         ):
 
-            # This dashboard is for queue management. Do not draw
-            # detections outside the queue ROI.
             if not point_in_polygon(
                 tuple(centroid),
                 zone,
@@ -474,29 +474,35 @@ class BrowserCameraProcessor:
                 (x1, y1),
                 (x2, y2),
                 (0, 255, 0),
-                2,
+                3,
             )
 
-        for object_id, centroid in objects.items():
-
-            if not point_in_polygon(
-                tuple(centroid),
-                zone,
-            ):
-                continue
-
+            # Clear human label instead of a bare tracker ID.
             cv2.putText(
                 img,
-                f"ID: {object_id}",
+                "HUMAN",
                 (
-                    int(centroid[0]) - 15,
-                    int(centroid[1]) - 15,
+                    x1,
+                    max(24, y1 - 8),
                 ),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
+                0.55,
+                (0, 255, 0),
                 2,
             )
+
+        cv2.putText(
+            img,
+            f"Humans in ROI: {len(centroids)}",
+            (
+                20,
+                65,
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+        )
 
         cv2.putText(
             img,
@@ -783,46 +789,65 @@ class BrowserCameraProcessor:
                     else 2.5
                 )
 
-                # Keep ONLY confirmed-person overlays.
-                confirmed_centroids = list(
-                    confirmed_objects.values()
-                )
+                # Keep an exact bounding-box mapping for confirmed people.
+                # This is more reliable than matching boxes to centroids again.
+                confirmed_box_map = {}
 
-                confirmed_boxes = []
-
-                confirmed_box_centroids = []
-
-                for box, centroid in zip(
-                    boxes,
-                    centroids,
+                for object_id, object_centroid in (
+                    confirmed_objects.items()
                 ):
+                    best_box = None
+                    best_distance = float("inf")
 
-                    matched = any(
-                        (
+                    for box, detected_centroid in zip(
+                        boxes,
+                        centroids,
+                    ):
+                        distance = (
                             (
-                                centroid[0]
-                                - cp[0]
+                                object_centroid[0]
+                                - detected_centroid[0]
                             ) ** 2
                             + (
-                                centroid[1]
-                                - cp[1]
+                                object_centroid[1]
+                                - detected_centroid[1]
                             ) ** 2
-                        )
-                        ** 0.5
-                        < 100
-                        for cp in confirmed_centroids
+                        ) ** 0.5
+
+                        if distance < best_distance:
+                            best_distance = distance
+                            best_box = box
+
+                    if (
+                        best_box is not None
+                        and best_distance < 140
+                    ):
+                        confirmed_box_map[object_id] = best_box
+
+                self.confirmed_boxes = confirmed_box_map
+
+                # Only confirmed humans inside the ROI are shown/countable.
+                boxes = []
+                centroids = []
+
+                for object_id, object_centroid in (
+                    confirmed_objects.items()
+                ):
+                    if not point_in_polygon(
+                        tuple(object_centroid),
+                        zone,
+                    ):
+                        continue
+
+                    if object_id not in confirmed_box_map:
+                        continue
+
+                    boxes.append(
+                        confirmed_box_map[object_id]
                     )
-
-                    if matched:
-                        confirmed_boxes.append(
-                            box
-                        )
-                        confirmed_box_centroids.append(
-                            centroid
-                        )
-
-                boxes = confirmed_boxes
-                centroids = confirmed_box_centroids
+                    centroids.append(
+                        object_centroid
+                    )
 
                 # Make the annotated output from this latest inference.
                 annotated = self._draw_overlay(
