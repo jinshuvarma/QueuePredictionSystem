@@ -176,8 +176,8 @@ def point_in_polygon(point, polygon):
 class CentroidTracker:
     def __init__(
         self,
-        max_disappeared=6,
-        max_distance=85,
+        max_disappeared=10,
+        max_distance=120,
     ):
         self.next_object_id = 0
         self.objects = {}
@@ -541,9 +541,9 @@ class BrowserCameraProcessor:
                 results = self.model(
                     frame,
                     classes=[0],
-                    conf=0.65,
-                    imgsz=320,
-                    max_det=6,
+                    conf=0.45,
+                    imgsz=416,
+                    max_det=10,
                     verbose=False,
                 )[0]
 
@@ -576,7 +576,7 @@ class BrowserCameraProcessor:
 
                     confidence = float(confidence)
 
-                    if confidence < 0.65:
+                    if confidence < 0.45:
                         continue
 
                     x1, y1, x2, y2 = map(
@@ -606,18 +606,18 @@ class BrowserCameraProcessor:
                     )
 
                     # Conservative filters for webcam demo.
-                    if box_h < 55:
+                    if box_h < 30:
                         continue
 
-                    if area_ratio < 0.008:
+                    if area_ratio < 0.002:
                         continue
 
-                    if area_ratio > 0.70:
+                    if area_ratio > 0.80:
                         continue
 
                     if (
-                        aspect_ratio < 0.20
-                        or aspect_ratio > 1.10
+                        aspect_ratio < 0.15
+                        or aspect_ratio > 1.45
                     ):
                         continue
 
@@ -670,7 +670,7 @@ class BrowserCameraProcessor:
                         self.candidate_hits[
                             object_id
                         ]
-                        >= 3
+                        >= 2
                     ):
                         self.confirmed_ids.add(
                             object_id
@@ -808,7 +808,7 @@ class BrowserCameraProcessor:
                             ) ** 2
                         )
                         ** 0.5
-                        < 65
+                        < 100
                         for cp in confirmed_centroids
                     )
 
