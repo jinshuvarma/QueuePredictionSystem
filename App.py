@@ -85,7 +85,7 @@ if "history_df" not in st.session_state or st.session_state.history_df.empty:
 
 auto_refresh = st.sidebar.checkbox("Auto-Update Dashboard", value=True)
 
-refresh_secs = st.sidebar.slider("UI Refresh Rate (secs)", 0.1, 2.0, 0.2) 
+refresh_secs = st.sidebar.slider("UI Refresh Rate (secs)", 0.3, 2.0, 0.5) 
 
 # --- Data Pipeline Execution ---
 if data_mode == "Simulation":
@@ -138,6 +138,7 @@ else:
             self.latest_frame = None
             self.lock = threading.Lock()
             self.frame_count = 0
+            self.last_annotated_frame = None
 
         def _scaled_zone(self, width, height):
             sx = width / 514.0
@@ -149,7 +150,13 @@ else:
             img = frame.to_ndarray(format="bgr24")
             self.frame_count += 1
 
-            if self.frame_count % 2 != 0:
+            # Run YOLO every 3rd frame to keep browser video responsive while
+            # retaining the most recent annotated result.
+            if self.frame_count % 3 != 0:
+                with self.lock:
+                    cached = None if self.last_annotated_frame is None else self.last_annotated_frame.copy()
+                if cached is not None:
+                    return av.VideoFrame.from_ndarray(cached, format="bgr24")
                 return av.VideoFrame.from_ndarray(img, format="bgr24")
 
             h, w = img.shape[:2]
@@ -231,6 +238,7 @@ else:
             with self.lock:
                 self.latest_row = row
                 self.latest_frame = img.copy()
+                self.last_annotated_frame = img.copy()
 
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -306,16 +314,17 @@ st.markdown("---")
 c_left, c_right = st.columns([1.2, 1])
 
 with c_left:
-    st.subheader("Camera")
+    st.subheader("📷 Live Camera")
     if data_mode == "Live Camera":
-        st.caption("Browser camera is connected through WebRTC. Press START above and allow camera permission.")
-        with processor.lock:
-            preview = None if processor.latest_frame is None else processor.latest_frame.copy()
-        if preview is not None:
-            preview_rgb = preview[:, :, ::-1]
-            st.image(Image.fromarray(preview_rgb), caption="YOLO Live Detection", use_container_width=True)
+        st.caption("Browser camera • YOLO person detection • Queue ROI tracking")
+        # WebRTC renders the camera stream directly in the browser. This avoids
+        # a second, stale Streamlit image preview and gives smoother video.
+        if rtc_ctx.state.playing:
+            st.success("🟢 Camera connected — YOLO detection is running")
+        else:
+            st.info("Click **START** above and allow camera permission.")
     else:
-        st.info("Visual intelligence disabled in Simulation Mode. Switch to Live Camera in sidebar.")
+        st.info("Visual intelligence is disabled in Simulation Mode. Switch to Live Camera in the sidebar.")
 
 with c_right:
     st.subheader("Live State Estimation")
@@ -408,3 +417,4 @@ except Exception:
 if auto_refresh:
     time.sleep(refresh_secs)
     st.rerun()
+
