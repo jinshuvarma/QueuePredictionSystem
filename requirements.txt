@@ -3,9 +3,9 @@ pandas
 numpy
 pillow
 plotly
+statsmodels
 ultralytics
 ultralytics-opencv-headless
-statsmodels
 pyttsx3
 streamlit-webrtc
 av
