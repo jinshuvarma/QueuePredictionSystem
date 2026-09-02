@@ -377,10 +377,15 @@ class BrowserCameraProcessor:
         self.latest_input = None
         self.latest_output = None
 
+        # A person must survive multiple inference passes before being
+        # accepted. This suppresses transient false detections on objects.
+        self.candidate_hits = {}
+        self.confirmed_ids = set()
+
         self.frame_counter = 0
 
         # Do not let inference queue build up.
-        self.inference_every_n_frames = 2
+        self.inference_every_n_frames = 1
 
         self.worker_running = True
         self.worker_busy = False
@@ -454,28 +459,31 @@ class BrowserCameraProcessor:
             centroids,
         ):
 
-            x1, y1, x2, y2 = box
-
-            in_zone = point_in_polygon(
+            # This dashboard is for queue management. Do not draw
+            # detections outside the queue ROI.
+            if not point_in_polygon(
                 tuple(centroid),
                 zone,
-            )
+            ):
+                continue
 
-            box_color = (
-                (0, 255, 0)
-                if in_zone
-                else (0, 0, 255)
-            )
+            x1, y1, x2, y2 = box
 
             cv2.rectangle(
                 img,
                 (x1, y1),
                 (x2, y2),
-                box_color,
+                (0, 255, 0),
                 2,
             )
 
         for object_id, centroid in objects.items():
+
+            if not point_in_polygon(
+                tuple(centroid),
+                zone,
+            ):
+                continue
 
             cv2.putText(
                 img,
@@ -533,64 +541,105 @@ class BrowserCameraProcessor:
                 results = self.model(
                     frame,
                     classes=[0],
-                    conf=0.55,
-                    imgsz=416,
-                    max_det=10,
+                    conf=0.65,
+                    imgsz=320,
+                    max_det=6,
                     verbose=False,
                 )[0]
 
                 boxes = []
                 centroids = []
 
-                xyxy = (
-                    results.boxes.xyxy.cpu().numpy()
-                    if results.boxes is not None
-                    else []
-                )
-                cls_ids = (
-                    results.boxes.cls.cpu().numpy()
-                    if results.boxes is not None
-                    else []
-                )
-                confidences = (
-                    results.boxes.conf.cpu().numpy()
-                    if results.boxes is not None
-                    else []
+                if results.boxes is not None:
+                    xyxy = results.boxes.xyxy.cpu().numpy()
+                    cls_ids = results.boxes.cls.cpu().numpy()
+                    confidences = results.boxes.conf.cpu().numpy()
+                else:
+                    xyxy = []
+                    cls_ids = []
+                    confidences = []
+
+                frame_h, frame_w = frame.shape[:2]
+                frame_area = float(
+                    frame_h * frame_w
                 )
 
+                # Explicitly accept ONLY class 0 (person).
                 for box, cls_id, confidence in zip(
                     xyxy,
                     cls_ids,
                     confidences,
                 ):
-                    # Explicit COCO class-0 check: only PERSON.
-                    if int(cls_id) != 0 or float(confidence) < 0.55:
+
+                    if int(cls_id) != 0:
                         continue
 
-                    x1, y1, x2, y2 = box
+                    confidence = float(confidence)
+
+                    if confidence < 0.65:
+                        continue
+
+                    x1, y1, x2, y2 = map(
+                        float,
+                        box,
+                    )
 
                     box_w = x2 - x1
                     box_h = y2 - y1
 
-                    # Reject tiny / obviously non-person false positives.
-                    if box_h < 45 or box_w < 18:
+                    if box_w <= 0 or box_h <= 0:
                         continue
-                    if box_w / max(box_h, 1.0) > 1.8:
+
+                    area_ratio = (
+                        box_w * box_h
+                    ) / max(
+                        frame_area,
+                        1.0,
+                    )
+
+                    aspect_ratio = (
+                        box_w
+                        / max(
+                            box_h,
+                            1.0,
+                        )
+                    )
+
+                    # Conservative filters for webcam demo.
+                    if box_h < 55:
+                        continue
+
+                    if area_ratio < 0.008:
+                        continue
+
+                    if area_ratio > 0.70:
+                        continue
+
+                    if (
+                        aspect_ratio < 0.20
+                        or aspect_ratio > 1.10
+                    ):
+                        continue
+
+                    cx = (x1 + x2) / 2.0
+                    cy = (y1 + y2) / 2.0
+
+                    if not (
+                        0 <= cx < frame_w
+                        and 0 <= cy < frame_h
+                    ):
                         continue
 
                     centroids.append(
-                        (
-                            (x1 + x2) / 2,
-                            (y1 + y2) / 2,
-                        )
+                        (cx, cy)
                     )
 
                     boxes.append(
                         (
-                            int(x1),
-                            int(y1),
-                            int(x2),
-                            int(y2),
+                            int(max(0, x1)),
+                            int(max(0, y1)),
+                            int(min(frame_w - 1, x2)),
+                            int(min(frame_h - 1, y2)),
                         )
                     )
 
@@ -598,10 +647,74 @@ class BrowserCameraProcessor:
                     centroids
                 )
 
+                # ------------------------------------------------
+                # Temporal confirmation: 3 consecutive observations.
+                # ------------------------------------------------
+                visible_ids = set(
+                    objects.keys()
+                )
+
+                for object_id in visible_ids:
+
+                    self.candidate_hits[
+                        object_id
+                    ] = (
+                        self.candidate_hits.get(
+                            object_id,
+                            0,
+                        )
+                        + 1
+                    )
+
+                    if (
+                        self.candidate_hits[
+                            object_id
+                        ]
+                        >= 3
+                    ):
+                        self.confirmed_ids.add(
+                            object_id
+                        )
+
+                for object_id in list(
+                    self.candidate_hits.keys()
+                ):
+
+                    if object_id not in visible_ids:
+
+                        self.candidate_hits[
+                            object_id
+                        ] -= 1
+
+                        if (
+                            self.candidate_hits[
+                                object_id
+                            ]
+                            <= 0
+                        ):
+                            self.candidate_hits.pop(
+                                object_id,
+                                None,
+                            )
+
+                            self.confirmed_ids.discard(
+                                object_id
+                            )
+
+                confirmed_objects = {
+                    object_id: objects[object_id]
+                    for object_id in (
+                        visible_ids
+                        & self.confirmed_ids
+                    )
+                }
+
                 current_ids = set()
                 now = time.time()
 
-                for object_id, centroid in objects.items():
+                for object_id, centroid in (
+                    confirmed_objects.items()
+                ):
 
                     if point_in_polygon(
                         tuple(centroid),
@@ -631,15 +744,15 @@ class BrowserCameraProcessor:
                     - current_ids
                 )
 
-                arrivals = len(new_ids)
+                arrivals = len(
+                    new_ids
+                )
+
                 served = 0
 
                 for object_id in left_ids:
 
-                    if (
-                        object_id
-                        in self.entry_ts
-                    ):
+                    if object_id in self.entry_ts:
 
                         dwell_min = (
                             now
@@ -648,7 +761,7 @@ class BrowserCameraProcessor:
                             )
                         ) / 60.0
 
-                        if dwell_min >= 0.5:
+                        if dwell_min >= 0.25:
 
                             served += 1
 
@@ -659,9 +772,7 @@ class BrowserCameraProcessor:
                 self.seen_ids = current_ids
 
                 recent_service = (
-                    self.service_times[
-                        -20:
-                    ]
+                    self.service_times[-20:]
                 )
 
                 avg_service_time = (
@@ -670,6 +781,47 @@ class BrowserCameraProcessor:
                     if recent_service
                     else 2.5
                 )
+
+                # Keep ONLY confirmed-person overlays.
+                confirmed_centroids = list(
+                    confirmed_objects.values()
+                )
+
+                confirmed_boxes = []
+
+                confirmed_box_centroids = []
+
+                for box, centroid in zip(
+                    boxes,
+                    centroids,
+                ):
+
+                    matched = any(
+                        (
+                            (
+                                centroid[0]
+                                - cp[0]
+                            ) ** 2
+                            + (
+                                centroid[1]
+                                - cp[1]
+                            ) ** 2
+                        )
+                        ** 0.5
+                        < 65
+                        for cp in confirmed_centroids
+                    )
+
+                    if matched:
+                        confirmed_boxes.append(
+                            box
+                        )
+                        confirmed_box_centroids.append(
+                            centroid
+                        )
+
+                boxes = confirmed_boxes
+                centroids = confirmed_box_centroids
 
                 # Make the annotated output from this latest inference.
                 annotated = self._draw_overlay(
@@ -1233,8 +1385,8 @@ if data_mode == "Live Camera":
                         "max": 360,
                     },
                     "frameRate": {
-                        "ideal": 15,
-                        "max": 18,
+                        "ideal": 12,
+                        "max": 15,
                     },
                 },
                 "audio": False,
