@@ -4,7 +4,6 @@ numpy
 pillow
 plotly
 statsmodels
-ultralytics
 ultralytics-opencv-headless
 pyttsx3
 streamlit-webrtc
