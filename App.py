@@ -58,7 +58,8 @@ st.markdown(
 COUNTERS = ["Counter 1", "Counter 2", "Counter 3"]
 FORECAST_STEPS = 20
 CROWD_THRESHOLD = 30
-AUDIO_COOLDOWN_SECONDS = 10
+AUDIO_COOLDOWN_SECONDS = 20
+LIVE_ALERT_SUSTAIN_SECONDS = 5
 
 
 # ============================================================
@@ -80,6 +81,12 @@ if "last_audio_time" not in st.session_state:
 
 if "browser_last_spoken" not in st.session_state:
     st.session_state.browser_last_spoken = ""
+
+if "live_alert_since" not in st.session_state:
+    st.session_state.live_alert_since = None
+
+if "live_alert_active" not in st.session_state:
+    st.session_state.live_alert_active = False
 
 
 # ============================================================
@@ -107,6 +114,13 @@ if st.session_state.current_mode != data_mode:
             "avg_service_time",
         ]
     )
+
+    # Do not carry Simulation alert/voice state into Live Camera.
+    st.session_state.browser_last_spoken = ""
+    st.session_state.live_alert_since = None
+    st.session_state.live_alert_active = False
+    st.session_state.last_audio_time = datetime.min
+
     st.session_state.current_mode = data_mode
     st.rerun()
 
@@ -874,8 +888,9 @@ def render_state_and_actions(
     state_df,
     recommendations,
     prefix,
+    voice_enabled=False,
+    actual_queue_count=None,
 ):
-
     st.subheader(
         "Live State Estimation"
     )
@@ -900,103 +915,129 @@ def render_state_and_actions(
         "Actions needs to be perform"
     )
 
-    current_time = datetime.now()
     high_alert = None
 
     for severity, msg in recommendations:
 
         if severity == "high":
-
             st.error(
                 f"ACTION REQUIRED: {msg}"
             )
-
             if high_alert is None:
                 high_alert = msg
 
         elif severity == "medium":
-
             st.warning(
                 f"⚠️ {msg}"
             )
 
         elif severity == "warning":
-
             st.info(
                 f"⏳ {msg}"
             )
 
         else:
-
             st.success(
                 f"✅ {msg}"
             )
 
-    # Browser-side speech. This is audible on the evaluator's browser,
-    # unlike pyttsx3 running on the Streamlit server.
-    if high_alert:
+    # --------------------------------------------------------
+    # LIVE-ONLY browser speech.
+    #
+    # We intentionally do NOT speak based on the forecast alert alone.
+    # A real queue must remain >= CROWD_THRESHOLD for several seconds.
+    # This prevents one person + an aggressive forecast from producing
+    # "ATTENTION: QUEUE FULL" during a 10–15 second demo.
+    # --------------------------------------------------------
+    if voice_enabled:
+        now = time.time()
 
-        clean_msg = (
-            high_alert
-            .split(" — ")[0]
-            .replace(
-                "min",
-                "minutes",
-            )
+        sustained_full = (
+            actual_queue_count is not None
+            and actual_queue_count >= CROWD_THRESHOLD
         )
 
-        if (
-            clean_msg
-            != st.session_state.browser_last_spoken
-        ):
+        if sustained_full:
+            if st.session_state.live_alert_since is None:
+                st.session_state.live_alert_since = now
 
-            components.html(
-                f"""
-                <script>
-                (() => {{
-                    const text = {json.dumps(
-                        "Attention please. "
-                        + clean_msg
-                    )};
-
-                    try {{
-                        window.speechSynthesis.cancel();
-
-                        const u =
-                            new SpeechSynthesisUtterance(text);
-
-                        u.rate = 0.95;
-                        u.pitch = 1.0;
-                        u.volume = 1.0;
-
-                        window.speechSynthesis.speak(u);
-                    }} catch (e) {{
-                        console.log(e);
-                    }}
-                }})();
-                </script>
-                """,
-                height=1,
+            sustained_for = (
+                now
+                - st.session_state.live_alert_since
             )
 
-            st.session_state.browser_last_spoken = (
-                clean_msg
-            )
+            if (
+                high_alert
+                and sustained_for >= LIVE_ALERT_SUSTAIN_SECONDS
+            ):
+                clean_msg = (
+                    high_alert
+                    .split(" — ")[0]
+                    .replace("min", "minutes")
+                )
 
-            st.session_state.last_audio_time = (
-                current_time
-            )
+                cooldown_ok = (
+                    st.session_state.live_alert_active is False
+                    or (
+                        now
+                        - (
+                            st.session_state.last_audio_time.timestamp()
+                            if st.session_state.last_audio_time != datetime.min
+                            else 0
+                        )
+                        >= AUDIO_COOLDOWN_SECONDS
+                    )
+                )
+
+                if (
+                    clean_msg
+                    != st.session_state.browser_last_spoken
+                    and cooldown_ok
+                ):
+                    components.html(
+                        f"""
+                        <script>
+                        (() => {{
+                            const text = {json.dumps(
+                                "Attention please. "
+                                + clean_msg
+                            )};
+
+                            try {{
+                                window.speechSynthesis.cancel();
+                                const u =
+                                    new SpeechSynthesisUtterance(text);
+                                u.rate = 0.95;
+                                u.pitch = 1.0;
+                                u.volume = 1.0;
+                                window.speechSynthesis.speak(u);
+                            }} catch (e) {{
+                                console.log(e);
+                            }}
+                        }})();
+                        </script>
+                        """,
+                        height=1,
+                    )
+
+                    st.session_state.browser_last_spoken = clean_msg
+                    st.session_state.last_audio_time = datetime.now()
+                    st.session_state.live_alert_active = True
+
+        else:
+            # Queue dropped below the real threshold: reset sustained alert state.
+            st.session_state.live_alert_since = None
+            st.session_state.live_alert_active = False
+            st.session_state.browser_last_spoken = ""
 
     with st.expander(
         "🔊 Voice Alert",
         expanded=False,
     ):
-
         if st.button(
             "Test Voice",
             key=f"{prefix}_voice_test",
         ):
-
             components.html(
                 """
                 <script>
@@ -1015,6 +1056,7 @@ def render_state_and_actions(
                 """,
                 height=1,
             )
+
 
 
 def build_forecast_chart(
@@ -1284,10 +1326,18 @@ if data_mode == "Live Camera":
             render_metrics(state_df)
 
         with live_state_placeholder.container():
+            actual_queue_count = int(
+                state_df["people_in_queue"].sum()
+                if not state_df.empty
+                else 0
+            )
+
             render_state_and_actions(
                 state_df,
                 recommendations,
                 prefix="live",
+                voice_enabled=True,
+                actual_queue_count=actual_queue_count,
             )
 
         with live_forecast_placeholder.container():
@@ -1438,6 +1488,8 @@ else:
         state_df,
         recommendations,
         prefix="simulation",
+        voice_enabled=False,
+        actual_queue_count=None,
     )
 
     st.markdown("---")
