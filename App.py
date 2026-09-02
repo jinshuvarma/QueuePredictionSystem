@@ -384,21 +384,19 @@ CAMERA_ZONE = [
 
 
 class BrowserCameraProcessor:
+    """Browser camera -> YOLO person detection -> queue ROI -> live state."""
 
     def __init__(self, zone):
-
         self.zone = zone
-
-                                                     
-        self.model = YOLO(
-            "yolov8n.pt"
-        )
-
-        self.tracker = CentroidTracker()
+        self.model = YOLO("yolov8n.pt")
+        self.tracker = CentroidTracker(max_disappeared=8, max_distance=90)
 
         self.entry_ts = {}
         self.seen_ids = set()
         self.service_times = []
+        self.candidate_hits = {}
+        self.confirmed_ids = set()
+        self.confirmed_boxes = {}
 
         self.latest_row = {
             "timestamp": datetime.now(),
@@ -410,22 +408,13 @@ class BrowserCameraProcessor:
         }
 
         self.lock = threading.Lock()
-
-                                     
         self.latest_input = None
         self.latest_output = None
-
-                                                                      
-                                                                          
-        self.candidate_hits = {}
-        self.confirmed_ids = set()
-        self.confirmed_boxes = {}
-
+        self.last_boxes = []
+        self.last_centroids = []
+        self.last_objects = {}
         self.frame_counter = 0
-
-                                              
         self.inference_every_n_frames = 1
-
         self.worker_running = True
         self.worker_busy = False
 
@@ -433,136 +422,47 @@ class BrowserCameraProcessor:
             target=self._inference_worker,
             daemon=True,
         )
-
         self.worker.start()
 
-    def _scaled_zone(
-        self,
-        width,
-        height,
-    ):
+    def _scaled_zone(self, width, height):
         sx = width / 514.0
         sy = height / 475.0
+        return [(int(x * sx), int(y * sy)) for x, y in self.zone]
 
-        return [
-            (
-                int(x * sx),
-                int(y * sy),
-            )
-            for x, y in self.zone
-        ]
-
-    def _draw_overlay(
-        self,
-        img,
-        zone,
-        boxes,
-        centroids,
-        objects,
-    ):
+    def _draw_overlay(self, img, zone, boxes, centroids, objects):
         import cv2
 
-        roi_points = np.array(
-            zone,
-            dtype=np.int32,
-        )
-
-                                                     
+        roi_points = np.array(zone, dtype=np.int32)
         overlay = img.copy()
+        cv2.fillPoly(overlay, [roi_points], (0, 255, 255))
+        cv2.addWeighted(overlay, 0.10, img, 0.90, 0, img)
+        cv2.polylines(img, [roi_points], True, (0, 255, 255), 3)
 
-        cv2.fillPoly(
-            overlay,
-            [roi_points],
-            (0, 255, 255),
-        )
-
-        cv2.addWeighted(
-            overlay,
-            0.10,
-            img,
-            0.90,
-            0,
-            img,
-        )
-
-        cv2.polylines(
-            img,
-            [roi_points],
-            True,
-            (0, 255, 255),
-            3,
-        )
-
-                                                                      
-        for box, centroid in zip(
-            boxes,
-            centroids,
-        ):
-
-            if not point_in_polygon(
-                tuple(centroid),
-                zone,
-            ):
-                continue
-
+        for box, footpoint in zip(boxes, centroids):
+            # Boxes shown here are ONLY confirmed humans standing in queue ROI.
             x1, y1, x2, y2 = box
-
-            cv2.rectangle(
-                img,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                3,
-            )
-
-                                                             
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
             cv2.putText(
-                img,
-                "HUMAN",
-                (
-                    x1,
-                    max(24, y1 - 8),
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (0, 255, 0),
-                2,
+                img, "HUMAN IN QUEUE", (x1, max(24, y1 - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 0), 2,
             )
+            cv2.circle(img, (int(footpoint[0]), int(footpoint[1])), 5, (0, 255, 0), -1)
 
         cv2.putText(
-            img,
-            f"Humans in ROI: {len(centroids)}",
-            (
-                20,
-                65,
-            ),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0),
-            2,
+            img, f"QUEUE HUMANS: {len(centroids)}", (20, 65),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2,
         )
-
         cv2.putText(
-            img,
-            "QUEUE ROI",
-            (20, 35),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (0, 255, 255),
-            2,
+            img, "QUEUE ROI", (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2,
         )
-
         return img
 
     def _inference_worker(self):
-
         import cv2
 
         while self.worker_running:
-
             frame = None
-
-                                                                         
             with self.lock:
                 if self.latest_input is not None:
                     frame = self.latest_input
@@ -574,439 +474,191 @@ class BrowserCameraProcessor:
                 continue
 
             try:
+                frame_h, frame_w = frame.shape[:2]
+                zone = self._scaled_zone(frame_w, frame_h)
 
-                h, w = frame.shape[:2]
-
-                zone = self._scaled_zone(
-                    w,
-                    h,
-                )
-
-                results = self.model(
+                # Detect ONLY COCO class 0 (person).
+                result = self.model(
                     frame,
                     classes=[0],
-                    conf=0.35,
+                    conf=0.40,
                     imgsz=480,
                     max_det=20,
                     verbose=False,
                 )[0]
 
-                boxes = []
-                centroids = []
+                queue_boxes = []
+                queue_footpoints = []
+                frame_area = float(frame_h * frame_w)
 
-                if results.boxes is not None:
-                    xyxy = results.boxes.xyxy.cpu().numpy()
-                    cls_ids = results.boxes.cls.cpu().numpy()
-                    confidences = results.boxes.conf.cpu().numpy()
+                if result.boxes is not None and len(result.boxes) > 0:
+                    xyxy = result.boxes.xyxy.cpu().numpy()
+                    cls_ids = result.boxes.cls.cpu().numpy()
+                    confidences = result.boxes.conf.cpu().numpy()
                 else:
-                    xyxy = []
-                    cls_ids = []
-                    confidences = []
+                    xyxy, cls_ids, confidences = [], [], []
 
-                frame_h, frame_w = frame.shape[:2]
-                frame_area = float(
-                    frame_h * frame_w
-                )
-
-                                                          
-                for box, cls_id, confidence in zip(
-                    xyxy,
-                    cls_ids,
-                    confidences,
-                ):
-
+                for box, cls_id, confidence in zip(xyxy, cls_ids, confidences):
+                    # Hard guard: never treat non-person classes as humans.
                     if int(cls_id) != 0:
                         continue
-
-                    confidence = float(confidence)
-
-                    if confidence < 0.35:
+                    if float(confidence) < 0.40:
                         continue
 
-                    x1, y1, x2, y2 = map(
-                        float,
-                        box,
-                    )
-
+                    x1, y1, x2, y2 = map(float, box)
                     box_w = x2 - x1
                     box_h = y2 - y1
-
                     if box_w <= 0 or box_h <= 0:
                         continue
 
-                    area_ratio = (
-                        box_w * box_h
-                    ) / max(
-                        frame_area,
-                        1.0,
-                    )
+                    area_ratio = (box_w * box_h) / max(frame_area, 1.0)
+                    aspect_ratio = box_w / max(box_h, 1.0)
 
-                    aspect_ratio = (
-                        box_w
-                        / max(
-                            box_h,
-                            1.0,
-                        )
-                    )
-
-                                                              
-                                                                    
-                    if box_h < 24:
+                    # Loose geometry filters: remove obvious non-human artifacts
+                    # without rejecting small/distant people.
+                    if box_h < 22:
+                        continue
+                    if area_ratio < 0.0008 or area_ratio > 0.75:
+                        continue
+                    if aspect_ratio < 0.12 or aspect_ratio > 1.65:
                         continue
 
-                    if area_ratio < 0.001:
+                    # IMPORTANT: queue membership is based on the person's
+                    # standing/foot position, NOT the bbox center.
+                    foot_x = (x1 + x2) / 2.0
+                    foot_y = y2
+                    if not point_in_polygon((foot_x, foot_y), zone):
                         continue
 
-                    if area_ratio > 0.90:
-                        continue
+                    queue_footpoints.append((foot_x, foot_y))
+                    queue_boxes.append((
+                        int(max(0, x1)),
+                        int(max(0, y1)),
+                        int(min(frame_w - 1, x2)),
+                        int(min(frame_h - 1, y2)),
+                    ))
 
-                    if (
-                        aspect_ratio < 0.10
-                        or aspect_ratio > 2.0
-                    ):
-                        continue
+                # Tracker receives ONLY queue candidates. Therefore an object
+                # outside the ROI can never become a queue member.
+                objects = self.tracker.update(queue_footpoints)
+                visible_ids = set(objects.keys())
 
-                    cx = (x1 + x2) / 2.0
-                    cy = (y1 + y2) / 2.0
-
-                    if not (
-                        0 <= cx < frame_w
-                        and 0 <= cy < frame_h
-                    ):
-                        continue
-
-                    centroids.append(
-                        (cx, cy)
-                    )
-
-                    boxes.append(
-                        (
-                            int(max(0, x1)),
-                            int(max(0, y1)),
-                            int(min(frame_w - 1, x2)),
-                            int(min(frame_h - 1, y2)),
-                        )
-                    )
-
-                objects = self.tracker.update(
-                    centroids
-                )
-
-                                                                  
-                                                                    
-                                                                  
-                visible_ids = set(
-                    objects.keys()
-                )
-
+                # Temporal confirmation prevents one-frame false positives.
                 for object_id in visible_ids:
+                    self.candidate_hits[object_id] = self.candidate_hits.get(object_id, 0) + 1
+                    if self.candidate_hits[object_id] >= 3:
+                        self.confirmed_ids.add(object_id)
 
-                    self.candidate_hits[
-                        object_id
-                    ] = (
-                        self.candidate_hits.get(
-                            object_id,
-                            0,
-                        )
-                        + 1
-                    )
-
-                    if (
-                        self.candidate_hits[
-                            object_id
-                        ]
-                        >= 2
-                    ):
-                        self.confirmed_ids.add(
-                            object_id
-                        )
-
-                for object_id in list(
-                    self.candidate_hits.keys()
-                ):
-
+                for object_id in list(self.candidate_hits.keys()):
                     if object_id not in visible_ids:
+                        self.candidate_hits[object_id] -= 1
+                        if self.candidate_hits[object_id] <= 0:
+                            self.candidate_hits.pop(object_id, None)
+                            self.confirmed_ids.discard(object_id)
+                            self.entry_ts.pop(object_id, None)
 
-                        self.candidate_hits[
-                            object_id
-                        ] -= 1
-
-                        if (
-                            self.candidate_hits[
-                                object_id
-                            ]
-                            <= 0
-                        ):
-                            self.candidate_hits.pop(
-                                object_id,
-                                None,
-                            )
-
-                            self.confirmed_ids.discard(
-                                object_id
-                            )
-
-                confirmed_objects = {
-                    object_id: objects[object_id]
-                    for object_id in (
-                        visible_ids
-                        & self.confirmed_ids
-                    )
-                }
-
-                current_ids = set()
+                confirmed_ids_now = visible_ids & self.confirmed_ids
+                current_ids = set(confirmed_ids_now)
                 now = time.time()
 
-                for object_id, centroid in (
-                    confirmed_objects.items()
-                ):
+                for object_id in current_ids:
+                    if object_id not in self.entry_ts:
+                        self.entry_ts[object_id] = now
 
-                    if point_in_polygon(
-                        tuple(centroid),
-                        zone,
-                    ):
-
-                        current_ids.add(
-                            object_id
-                        )
-
-                        if (
-                            object_id
-                            not in self.entry_ts
-                        ):
-
-                            self.entry_ts[
-                                object_id
-                            ] = now
-
-                new_ids = (
-                    current_ids
-                    - self.seen_ids
-                )
-
-                left_ids = (
-                    self.seen_ids
-                    - current_ids
-                )
-
-                arrivals = len(
-                    new_ids
-                )
-
+                new_ids = current_ids - self.seen_ids
+                left_ids = self.seen_ids - current_ids
+                arrivals = len(new_ids)
                 served = 0
 
                 for object_id in left_ids:
-
-                    if object_id in self.entry_ts:
-
-                        dwell_min = (
-                            now
-                            - self.entry_ts.pop(
-                                object_id
-                            )
-                        ) / 60.0
-
+                    started = self.entry_ts.pop(object_id, None)
+                    if started is not None:
+                        dwell_min = (now - started) / 60.0
                         if dwell_min >= 0.25:
-
                             served += 1
-
-                            self.service_times.append(
-                                dwell_min
-                            )
+                            self.service_times.append(dwell_min)
 
                 self.seen_ids = current_ids
-
-                recent_service = (
-                    self.service_times[-20:]
-                )
-
+                recent_service = self.service_times[-20:]
                 avg_service_time = (
-                    sum(recent_service)
-                    / len(recent_service)
-                    if recent_service
-                    else 2.5
+                    sum(recent_service) / len(recent_service)
+                    if recent_service else 2.5
                 )
 
-                                                                          
-                                                                               
+                # Match confirmed tracker IDs back to their current YOLO boxes.
                 confirmed_box_map = {}
-
-                for object_id, object_centroid in (
-                    confirmed_objects.items()
-                ):
+                for object_id in confirmed_ids_now:
+                    object_centroid = objects[object_id]
                     best_box = None
                     best_distance = float("inf")
-
-                    for box, detected_centroid in zip(
-                        boxes,
-                        centroids,
-                    ):
+                    for box, footpoint in zip(queue_boxes, queue_footpoints):
                         distance = (
-                            (
-                                object_centroid[0]
-                                - detected_centroid[0]
-                            ) ** 2
-                            + (
-                                object_centroid[1]
-                                - detected_centroid[1]
-                            ) ** 2
+                            (object_centroid[0] - footpoint[0]) ** 2
+                            + (object_centroid[1] - footpoint[1]) ** 2
                         ) ** 0.5
-
                         if distance < best_distance:
                             best_distance = distance
                             best_box = box
-
-                    if (
-                        best_box is not None
-                        and best_distance < 140
-                    ):
+                    if best_box is not None and best_distance <= 90:
                         confirmed_box_map[object_id] = best_box
 
-                self.confirmed_boxes = confirmed_box_map
+                draw_boxes = []
+                draw_points = []
+                for object_id in confirmed_ids_now:
+                    box = confirmed_box_map.get(object_id)
+                    if box is not None:
+                        draw_boxes.append(box)
+                        draw_points.append(objects[object_id])
 
-                                                                           
-                boxes = []
-                centroids = []
-
-                for object_id, object_centroid in (
-                    confirmed_objects.items()
-                ):
-                    if not point_in_polygon(
-                        tuple(object_centroid),
-                        zone,
-                    ):
-                        continue
-
-                    if object_id not in confirmed_box_map:
-                        continue
-
-                    boxes.append(
-                        confirmed_box_map[object_id]
-                    )
-                    centroids.append(
-                        object_centroid
-                    )
-
-                                                                       
-                annotated = self._draw_overlay(
-                    frame.copy(),
-                    zone,
-                    boxes,
-                    centroids,
-                    objects,
-                )
-
+                # The row is the authoritative REAL-TIME queue state.
                 row = {
                     "timestamp": datetime.now(),
                     "counter_id": "Counter 1",
-                    "people_in_queue": len(
-                        current_ids
-                    ),
+                    "people_in_queue": len(current_ids),
                     "arrivals": arrivals,
                     "served": served,
-                    "avg_service_time": round(
-                        avg_service_time,
-                        2,
-                    ),
+                    "avg_service_time": round(avg_service_time, 2),
                 }
 
-                with self.lock:
-
-                    self.last_boxes = boxes
-                    self.last_centroids = centroids
-                    self.last_objects = objects
-
-                    self.latest_row = row
-
-                    self.latest_output = (
-                        annotated
-                    )
-
-            except Exception as e:
-
-                print(
-                    f"YOLO worker error: {e}"
+                annotated = self._draw_overlay(
+                    frame.copy(), zone, draw_boxes, draw_points, objects
                 )
 
-            finally:
+                with self.lock:
+                    self.last_boxes = draw_boxes
+                    self.last_centroids = draw_points
+                    self.last_objects = objects
+                    self.confirmed_boxes = confirmed_box_map
+                    self.latest_row = row
+                    self.latest_output = annotated
 
+            except Exception as e:
+                print(f"YOLO worker error: {e}")
+            finally:
                 with self.lock:
                     self.worker_busy = False
 
     def process(self, frame):
-
-        img = frame.to_ndarray(
-            format="bgr24"
-        )
-
+        img = frame.to_ndarray(format="bgr24")
         self.frame_counter += 1
 
-                                     
-                                                                 
-        if (
-            self.frame_counter
-            % self.inference_every_n_frames
-            == 0
-        ):
-
+        if self.frame_counter % self.inference_every_n_frames == 0:
             with self.lock:
-
+                # Latest-frame slot: never build a backlog of stale frames.
                 self.latest_input = img.copy()
 
-                                                   
-                                                                        
-                                            
         with self.lock:
-
-            latest_output = (
-                None
-                if self.latest_output is None
-                else self.latest_output.copy()
-            )
-
-            boxes = getattr(
-                self,
-                "last_boxes",
-                [],
-            )
-
-            centroids = getattr(
-                self,
-                "last_centroids",
-                [],
-            )
-
-            objects = getattr(
-                self,
-                "last_objects",
-                {},
-            )
+            latest_output = None if self.latest_output is None else self.latest_output.copy()
+            boxes = list(self.last_boxes)
+            centroids = list(self.last_centroids)
 
         if latest_output is not None:
-                                                                     
             h, w = img.shape[:2]
-            zone = self._scaled_zone(
-                w,
-                h,
-            )
+            zone = self._scaled_zone(w, h)
+            annotated = self._draw_overlay(img, zone, boxes, centroids, {})
+            return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
-            annotated = self._draw_overlay(
-                img,
-                zone,
-                boxes,
-                centroids,
-                objects,
-            )
-
-            return av.VideoFrame.from_ndarray(
-                annotated,
-                format="bgr24",
-            )
-
-        return av.VideoFrame.from_ndarray(
-            img,
-            format="bgr24",
-        )
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
 @st.cache_resource
