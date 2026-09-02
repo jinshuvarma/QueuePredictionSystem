@@ -6,3 +6,4 @@ plotly
 ultralytics
 ultralytics-opencv-headless
 statsmodels
+pyttsx3
