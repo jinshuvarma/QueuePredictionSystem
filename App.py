@@ -1399,7 +1399,7 @@ if data_mode == "Live Camera":
     processor = get_browser_processor()
 
     st.caption(
-        "Start the Live Vision Camera and allow camera permission."
+        "Click START and allow camera permission."
     )
 
     c_left, c_right = st.columns(
@@ -1449,12 +1449,12 @@ if data_mode == "Live Camera":
         if rtc_ctx.state.playing:
 
             st.success(
-                "VISION IS STARTED • Live Vision Camera"
+                "LIVE VISION IS STARTED"
             )
 
         else:
             st.info(
-                "LIVE VISION IS ENDED • Click START to begin the Live Vision Camera"
+                "LIVE VISION IS STOPPED"
             )
 
             st.caption(
