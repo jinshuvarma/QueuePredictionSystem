@@ -1,6 +1,6 @@
 streamlit
-opencv-python-headless
+pandas
 numpy
 pillow
+opencv-python-headless
 ultralytics
-yolov8n.pt
