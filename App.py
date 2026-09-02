@@ -126,7 +126,7 @@ st.sidebar.title("System Controls")
 
 data_mode = st.sidebar.radio(
     "Operation Mode",
-    ["Simulation", "Live Camera"],
+    ["Live Camera", "Simulation"],
     index=0,
 )
 
@@ -214,8 +214,8 @@ def point_in_polygon(point, polygon):
 class CentroidTracker:
     def __init__(
         self,
-        max_disappeared=12,
-        max_distance=140,
+        max_disappeared=4,
+        max_distance=110,
     ):
         self.next_object_id = 0
         self.objects = {}
@@ -389,7 +389,7 @@ class BrowserCameraProcessor:
     def __init__(self, zone):
         self.zone = zone
         self.model = YOLO("yolov8n.pt")
-        self.tracker = CentroidTracker(max_disappeared=8, max_distance=90)
+        self.tracker = CentroidTracker(max_disappeared=4, max_distance=110)
 
         self.entry_ts = {}
         self.seen_ids = set()
@@ -413,6 +413,7 @@ class BrowserCameraProcessor:
         self.last_boxes = []
         self.last_centroids = []
         self.last_objects = {}
+        self.last_ids = []
         self.frame_counter = 0
         self.inference_every_n_frames = 1
         self.worker_running = True
@@ -429,7 +430,7 @@ class BrowserCameraProcessor:
         sy = height / 475.0
         return [(int(x * sx), int(y * sy)) for x, y in self.zone]
 
-    def _draw_overlay(self, img, zone, boxes, centroids, objects):
+    def _draw_overlay(self, img, zone, boxes, centroids, objects, track_ids=None):
         import cv2
 
         roi_points = np.array(zone, dtype=np.int32)
@@ -438,12 +439,20 @@ class BrowserCameraProcessor:
         cv2.addWeighted(overlay, 0.10, img, 0.90, 0, img)
         cv2.polylines(img, [roi_points], True, (0, 255, 255), 3)
 
-        for box, footpoint in zip(boxes, centroids):
+        if track_ids is None:
+            track_ids = [None] * len(boxes)
+
+        for box, footpoint, track_id in zip(boxes, centroids, track_ids):
             # Boxes shown here are ONLY confirmed humans standing in queue ROI.
             x1, y1, x2, y2 = box
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
+            label = (
+                f"HUMAN #{track_id}"
+                if track_id is not None
+                else "HUMAN IN QUEUE"
+            )
             cv2.putText(
-                img, "HUMAN IN QUEUE", (x1, max(24, y1 - 8)),
+                img, label, (x1, max(24, y1 - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 0), 2,
             )
             cv2.circle(img, (int(footpoint[0]), int(footpoint[1])), 5, (0, 255, 0), -1)
@@ -541,7 +550,26 @@ class BrowserCameraProcessor:
                 # Tracker receives ONLY queue candidates. Therefore an object
                 # outside the ROI can never become a queue member.
                 objects = self.tracker.update(queue_footpoints)
-                visible_ids = set(objects.keys())
+
+                # IMPORTANT: tracker memory is allowed to keep an ID stable
+                # for a few missed frames, but only IDs that have a detection
+                # in THIS frame may count as currently waiting.
+                visible_ids = set()
+                unused_objects = set(objects.keys())
+                for footpoint in queue_footpoints:
+                    best_id = None
+                    best_distance = float("inf")
+                    for object_id in unused_objects:
+                        distance = (
+                            (objects[object_id][0] - footpoint[0]) ** 2
+                            + (objects[object_id][1] - footpoint[1]) ** 2
+                        ) ** 0.5
+                        if distance < best_distance:
+                            best_distance = distance
+                            best_id = object_id
+                    if best_id is not None and best_distance <= 110:
+                        visible_ids.add(best_id)
+                        unused_objects.discard(best_id)
 
                 # Temporal confirmation prevents one-frame false positives.
                 for object_id in visible_ids:
@@ -604,11 +632,13 @@ class BrowserCameraProcessor:
 
                 draw_boxes = []
                 draw_points = []
-                for object_id in confirmed_ids_now:
+                draw_ids = []
+                for object_id in sorted(confirmed_ids_now):
                     box = confirmed_box_map.get(object_id)
                     if box is not None:
                         draw_boxes.append(box)
                         draw_points.append(objects[object_id])
+                        draw_ids.append(object_id)
 
                 # The row is the authoritative REAL-TIME queue state.
                 row = {
@@ -621,12 +651,13 @@ class BrowserCameraProcessor:
                 }
 
                 annotated = self._draw_overlay(
-                    frame.copy(), zone, draw_boxes, draw_points, objects
+                    frame.copy(), zone, draw_boxes, draw_points, objects, draw_ids
                 )
 
                 with self.lock:
                     self.last_boxes = draw_boxes
                     self.last_centroids = draw_points
+                    self.last_ids = draw_ids
                     self.last_objects = objects
                     self.confirmed_boxes = confirmed_box_map
                     self.latest_row = row
@@ -651,11 +682,12 @@ class BrowserCameraProcessor:
             latest_output = None if self.latest_output is None else self.latest_output.copy()
             boxes = list(self.last_boxes)
             centroids = list(self.last_centroids)
+            track_ids = list(self.last_ids)
 
         if latest_output is not None:
             h, w = img.shape[:2]
             zone = self._scaled_zone(w, h)
-            annotated = self._draw_overlay(img, zone, boxes, centroids, {})
+            annotated = self._draw_overlay(img, zone, boxes, centroids, {}, track_ids)
             return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -1076,7 +1108,7 @@ if data_mode == "Live Camera":
     processor = get_browser_processor()
 
     st.caption(
-        "Click START and allow camera permission."
+        "Click START and allow camera permission. Only confirmed humans inside the Queue ROI are counted."
     )
 
     c_left, c_right = st.columns(
@@ -1197,6 +1229,7 @@ if data_mode == "Live Camera":
                 processor.latest_output = None
                 processor.last_boxes = []
                 processor.last_centroids = []
+                processor.last_ids = []
                 processor.last_objects = {}
                 processor.confirmed_ids.clear()
                 processor.candidate_hits.clear()
@@ -1288,11 +1321,37 @@ if data_mode == "Live Camera":
                 )
             ]
         else:
-            state_df, forecasts, recommendations = (
-                calculate_analytics(
-                    history
-                )
-            )
+            # Forecast/recommendations may use history, but the CURRENT queue
+            # state shown to the evaluator must come directly from the latest
+            # vision frame. This prevents old history from making an empty
+            # camera look like people are still waiting.
+            _, forecasts, recommendations = calculate_analytics(history)
+
+            current_count = int(live_row.get("people_in_queue", 0))
+            current_arrivals = int(live_row.get("arrivals", 0))
+            current_served = int(live_row.get("served", 0))
+            current_service = float(live_row.get("avg_service_time", 2.5))
+
+            if current_count <= 0:
+                recommendations = [(
+                    "normal",
+                    "No human detected in the queue ROI."
+                )]
+                state_df = pd.DataFrame([{
+                    "counter_id": "Counter 1",
+                    "people_in_queue": 0,
+                    "arrival_rate_per_min": 0.0,
+                    "avg_service_time_min": 2.5,
+                    "estimated_wait_min": 0.0,
+                }])
+            else:
+                state_df = pd.DataFrame([{
+                    "counter_id": "Counter 1",
+                    "people_in_queue": current_count,
+                    "arrival_rate_per_min": float(current_arrivals),
+                    "avg_service_time_min": current_service,
+                    "estimated_wait_min": current_count * current_service,
+                }])
 
         with live_metrics_placeholder.container():
             render_metrics(state_df)
