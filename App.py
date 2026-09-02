@@ -1,7 +1,6 @@
 import json
 import time
 import pandas as pd
-import cv2
 import threading
 import queue
 import numpy as np
@@ -11,6 +10,7 @@ from datetime import datetime
 
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
 import av
+from PIL import Image
 
 from ultralytics import YOLO
 
@@ -145,6 +145,7 @@ else:
             return [(int(x * sx), int(y * sy)) for x, y in self.zone]
 
         def process(self, frame):
+            import cv2
             img = frame.to_ndarray(format="bgr24")
             self.frame_count += 1
 
@@ -258,9 +259,14 @@ else:
 
     # Add the browser-camera data to the same history schema used by the simulator.
     live_df = pd.DataFrame([live_row])
-    st.session_state.history_df = pd.concat(
-        [st.session_state.history_df, live_df], ignore_index=True
-    )
+    if st.session_state.history_df.empty:
+        st.session_state.history_df = live_df
+    else:
+        last_ts = st.session_state.history_df["timestamp"].iloc[-1]
+        if live_row["timestamp"] != last_ts:
+            st.session_state.history_df = pd.concat(
+                [st.session_state.history_df, live_df], ignore_index=True
+            )
 
     if len(st.session_state.history_df) > 500:
         st.session_state.history_df = st.session_state.history_df.iloc[-500:]
@@ -306,8 +312,8 @@ with c_left:
         with processor.lock:
             preview = None if processor.latest_frame is None else processor.latest_frame.copy()
         if preview is not None:
-            preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
-            st.image(preview_rgb, caption="YOLO Live Detection", use_container_width=True)
+            preview_rgb = preview[:, :, ::-1]
+            st.image(Image.fromarray(preview_rgb), caption="YOLO Live Detection", use_container_width=True)
     else:
         st.info("Visual intelligence disabled in Simulation Mode. Switch to Live Camera in sidebar.")
 
