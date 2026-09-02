@@ -8,4 +8,3 @@ ultralytics-opencv-headless
 pyttsx3
 streamlit-webrtc
 av
-
