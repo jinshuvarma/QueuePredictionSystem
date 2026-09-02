@@ -176,8 +176,8 @@ def point_in_polygon(point, polygon):
 class CentroidTracker:
     def __init__(
         self,
-        max_disappeared=10,
-        max_distance=120,
+        max_disappeared=12,
+        max_distance=140,
     ):
         self.next_object_id = 0
         self.objects = {}
@@ -541,9 +541,9 @@ class BrowserCameraProcessor:
                 results = self.model(
                     frame,
                     classes=[0],
-                    conf=0.45,
-                    imgsz=416,
-                    max_det=10,
+                    conf=0.35,
+                    imgsz=480,
+                    max_det=20,
                     verbose=False,
                 )[0]
 
@@ -576,7 +576,7 @@ class BrowserCameraProcessor:
 
                     confidence = float(confidence)
 
-                    if confidence < 0.45:
+                    if confidence < 0.35:
                         continue
 
                     x1, y1, x2, y2 = map(
@@ -605,19 +605,20 @@ class BrowserCameraProcessor:
                         )
                     )
 
-                    # Conservative filters for webcam demo.
-                    if box_h < 30:
+                    # Keep geometry checks deliberately loose.
+                    # YOLO class-0 is the primary human-only filter.
+                    if box_h < 24:
                         continue
 
-                    if area_ratio < 0.002:
+                    if area_ratio < 0.001:
                         continue
 
-                    if area_ratio > 0.80:
+                    if area_ratio > 0.90:
                         continue
 
                     if (
-                        aspect_ratio < 0.15
-                        or aspect_ratio > 1.45
+                        aspect_ratio < 0.10
+                        or aspect_ratio > 2.0
                     ):
                         continue
 
@@ -1385,7 +1386,7 @@ if data_mode == "Live Camera":
                         "max": 360,
                     },
                     "frameRate": {
-                        "ideal": 12,
+                        "ideal": 15,
                         "max": 15,
                     },
                 },
