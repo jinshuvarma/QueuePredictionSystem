@@ -7,3 +7,5 @@ ultralytics
 ultralytics-opencv-headless
 statsmodels
 pyttsx3
+streamlit-webrtc
+av
