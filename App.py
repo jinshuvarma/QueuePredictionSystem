@@ -75,11 +75,48 @@ def get_announcer():
 
 announcer = get_announcer()
 
+def browser_speak(message):
+    safe_message = json.dumps(message)
+    components.html(
+        f"""
+        <script>
+        (() => {{
+            const text = {safe_message};
+            const speak = () => {{
+                try {{
+                    if (!window.speechSynthesis) return false;
+                    window.speechSynthesis.cancel();
+                    const utterance =
+                        new SpeechSynthesisUtterance(text);
+                    utterance.lang = "en-IN";
+                    utterance.rate = 0.92;
+                    utterance.pitch = 1.0;
+                    utterance.volume = 1.0;
+                    window.speechSynthesis.speak(utterance);
+                    return true;
+                }} catch (e) {{
+                    console.log(e);
+                    return false;
+                }}
+            }};
+            speak();
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
 if "last_audio_time" not in st.session_state:
     st.session_state.last_audio_time = datetime.min
 
 if "browser_last_spoken" not in st.session_state:
     st.session_state.browser_last_spoken = ""
+
+if "vision_started_announced" not in st.session_state:
+    st.session_state.vision_started_announced = False
+
+if "vision_stopped_announced" not in st.session_state:
+    st.session_state.vision_stopped_announced = False
 
 
                                                               
@@ -110,6 +147,8 @@ if st.session_state.current_mode != data_mode:
 
                                                                       
     st.session_state.browser_last_spoken = ""
+    st.session_state.vision_started_announced = False
+    st.session_state.vision_stopped_announced = False
     st.session_state.live_alert_since = None
     st.session_state.live_alert_active = False
     st.session_state.last_audio_time = datetime.min
@@ -1238,22 +1277,8 @@ def render_state_and_actions(
             "Test Voice",
             key=f"{prefix}_voice_test",
         ):
-            components.html(
-                """
-                <script>
-                window.speechSynthesis.cancel();
-
-                const u =
-                    new SpeechSynthesisUtterance(
-                        "VisionAI voice alert system is working."
-                    );
-
-                u.rate = 0.95;
-                u.volume = 1.0;
-                window.speechSynthesis.speak(u);
-                </script>
-                """,
-                height=1,
+            browser_speak(
+                "VisionAI voice alert system is working."
             )
 
 
@@ -1452,10 +1477,27 @@ if data_mode == "Live Camera":
                 "LIVE VISION IS STARTED"
             )
 
+            if not st.session_state.vision_started_announced:
+                browser_speak(
+                    "Live vision is started."
+                )
+                st.session_state.vision_started_announced = True
+                st.session_state.vision_stopped_announced = False
+
         else:
             st.info(
                 "LIVE VISION IS STOPPED"
             )
+
+            if (
+                st.session_state.vision_started_announced
+                and not st.session_state.vision_stopped_announced
+            ):
+                browser_speak(
+                    "Live vision is stopped."
+                )
+                st.session_state.vision_stopped_announced = True
+                st.session_state.vision_started_announced = False
 
             st.caption(
                 "Camera is waiting. Click START and allow access."
