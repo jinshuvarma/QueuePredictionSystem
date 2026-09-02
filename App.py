@@ -21,6 +21,9 @@ from recommender import generate_recommendations
 from audio_manager import AudioAnnouncer
 
 
+                                                              
+              
+                                                              
 st.set_page_config(
     page_title="VisionAI Queue Manager",
     layout="wide",
@@ -58,6 +61,9 @@ AUDIO_COOLDOWN_SECONDS = 20
 LIVE_ALERT_SUSTAIN_SECONDS = 5
 
 
+                                                              
+            
+                                                              
 @st.cache_resource
 def get_announcer():
     try:
@@ -75,6 +81,10 @@ if "last_audio_time" not in st.session_state:
 if "browser_last_spoken" not in st.session_state:
     st.session_state.browser_last_spoken = ""
 
+
+                                                              
+         
+                                                              
 st.sidebar.title("System Controls")
 
 data_mode = st.sidebar.radio(
@@ -97,6 +107,8 @@ if st.session_state.current_mode != data_mode:
             "avg_service_time",
         ]
     )
+
+                                                                      
     st.session_state.browser_last_spoken = ""
     st.session_state.live_alert_since = None
     st.session_state.live_alert_active = False
@@ -130,6 +142,9 @@ if "history_df" not in st.session_state:
     )
 
 
+                                                              
+                                
+                                                              
 def point_in_polygon(point, polygon):
     x, y = point
     inside = False
@@ -317,9 +332,9 @@ class CentroidTracker:
         return dict(self.objects)
 
 
-# ============================================================
-# LIVE CAMERA PROCESSOR
-# ============================================================
+                                                              
+                       
+                                                              
 CAMERA_ZONE = [
     (121, 472),
     (121, 4),
@@ -335,7 +350,7 @@ class BrowserCameraProcessor:
 
         self.zone = zone
 
-        # Model is created once per cached processor.
+                                                     
         self.model = YOLO(
             "yolov8n.pt"
         )
@@ -357,17 +372,19 @@ class BrowserCameraProcessor:
 
         self.lock = threading.Lock()
 
-        # Latest input/output frames.
+                                     
         self.latest_input = None
         self.latest_output = None
 
+                                                                      
+                                                                          
         self.candidate_hits = {}
         self.confirmed_ids = set()
         self.confirmed_boxes = {}
 
         self.frame_counter = 0
 
-        # Do not let inference queue build up.
+                                              
         self.inference_every_n_frames = 1
 
         self.worker_running = True
@@ -411,7 +428,7 @@ class BrowserCameraProcessor:
             dtype=np.int32,
         )
 
-        # ROI is ALWAYS drawn. This removes blinking.
+                                                     
         overlay = img.copy()
 
         cv2.fillPoly(
@@ -437,6 +454,7 @@ class BrowserCameraProcessor:
             3,
         )
 
+                                                                      
         for box, centroid in zip(
             boxes,
             centroids,
@@ -458,6 +476,7 @@ class BrowserCameraProcessor:
                 3,
             )
 
+                                                             
             cv2.putText(
                 img,
                 "HUMAN",
@@ -504,6 +523,7 @@ class BrowserCameraProcessor:
 
             frame = None
 
+                                                                         
             with self.lock:
                 if self.latest_input is not None:
                     frame = self.latest_input
@@ -549,6 +569,7 @@ class BrowserCameraProcessor:
                     frame_h * frame_w
                 )
 
+                                                          
                 for box, cls_id, confidence in zip(
                     xyxy,
                     cls_ids,
@@ -589,7 +610,8 @@ class BrowserCameraProcessor:
                         )
                     )
 
-
+                                                              
+                                                                    
                     if box_h < 24:
                         continue
 
@@ -631,6 +653,9 @@ class BrowserCameraProcessor:
                     centroids
                 )
 
+                                                                  
+                                                                    
+                                                                  
                 visible_ids = set(
                     objects.keys()
                 )
@@ -763,6 +788,8 @@ class BrowserCameraProcessor:
                     else 2.5
                 )
 
+                                                                          
+                                                                               
                 confirmed_box_map = {}
 
                 for object_id, object_centroid in (
@@ -798,6 +825,7 @@ class BrowserCameraProcessor:
 
                 self.confirmed_boxes = confirmed_box_map
 
+                                                                           
                 boxes = []
                 centroids = []
 
@@ -820,6 +848,7 @@ class BrowserCameraProcessor:
                         object_centroid
                     )
 
+                                                                       
                 annotated = self._draw_overlay(
                     frame.copy(),
                     zone,
@@ -873,7 +902,8 @@ class BrowserCameraProcessor:
 
         self.frame_counter += 1
 
-
+                                     
+                                                                 
         if (
             self.frame_counter
             % self.inference_every_n_frames
@@ -884,6 +914,9 @@ class BrowserCameraProcessor:
 
                 self.latest_input = img.copy()
 
+                                                   
+                                                                        
+                                            
         with self.lock:
 
             latest_output = (
@@ -911,6 +944,7 @@ class BrowserCameraProcessor:
             )
 
         if latest_output is not None:
+                                                                     
             h, w = img.shape[:2]
             zone = self._scaled_zone(
                 w,
@@ -942,6 +976,10 @@ def get_browser_processor():
         CAMERA_ZONE
     )
 
+
+                                                              
+        
+                                                              
 st.title(
     "VisionAI Queue Manager"
 )
@@ -951,6 +989,10 @@ st.markdown(
     "forecasting, and automated load balancing."
 )
 
+
+                                                              
+                   
+                                                              
 def calculate_analytics(history):
     state_df = compute_counter_states(
         history
@@ -1095,6 +1137,9 @@ def render_state_and_actions(
                 f"{msg}"
             )
 
+                    
+                                                                    
+                                                                              
     if voice_enabled and high_alert:
 
         now = time.time()
@@ -1139,7 +1184,7 @@ def render_state_and_actions(
                     >= AUDIO_COOLDOWN_SECONDS
                 )
 
-                # Same alert is not repeated until cooldown expires.
+                                                                    
                 if (
                     (
                         clean_msg
@@ -1314,6 +1359,8 @@ def build_forecast_chart(
         annotation_position="top right",
     )
 
+                                                                  
+                                                                       
     if history.empty or len(history) < 3:
         fig.add_annotation(
             text="Collecting live data for AI forecast…",
@@ -1343,12 +1390,16 @@ def build_forecast_chart(
 
     return fig
 
+
+                                                              
+                   
+                                                              
 if data_mode == "Live Camera":
 
     processor = get_browser_processor()
 
     st.caption(
-        "Click START and allow camera permission."
+        "Start the Live Vision Camera and allow camera permission."
     )
 
     c_left, c_right = st.columns(
@@ -1398,10 +1449,13 @@ if data_mode == "Live Camera":
         if rtc_ctx.state.playing:
 
             st.success(
-                "Camera connected — YOLO detection is running"
+                "VISION IS STARTED • Live Vision Camera"
             )
 
         else:
+            st.info(
+                "LIVE VISION IS ENDED • Click START to begin the Live Vision Camera"
+            )
 
             st.caption(
                 "Camera is waiting. Click START and allow access."
@@ -1409,7 +1463,7 @@ if data_mode == "Live Camera":
 
     with c_right:
 
-        # Initial placeholder. The actual numbers are refreshed below.
+                                                                      
         live_state_placeholder = st.empty()
         live_actions_placeholder = st.empty()
 
@@ -1426,6 +1480,9 @@ if data_mode == "Live Camera":
         )
     )
     def live_dashboard():
+
+                                                                      
+                                                                 
         camera_is_on = bool(
             rtc_ctx.state.playing
         )
@@ -1441,6 +1498,7 @@ if data_mode == "Live Camera":
                     "avg_service_time": 2.5,
                 }
 
+                                                                      
                 processor.latest_row = dict(live_row)
                 processor.latest_output = None
                 processor.last_boxes = []
@@ -1451,6 +1509,7 @@ if data_mode == "Live Camera":
                 processor.seen_ids.clear()
                 processor.entry_ts.clear()
 
+                                                   
             st.session_state.history_df = pd.DataFrame(
                 [live_row]
             )
@@ -1463,7 +1522,11 @@ if data_mode == "Live Camera":
 
             live_df = pd.DataFrame(
                 [live_row]
-            ),
+            )
+
+                                                                    
+                                                                       
+                                                                     
             if (
                 st.session_state.history_df.empty
                 or (
@@ -1643,8 +1706,14 @@ if data_mode == "Live Camera":
 
     live_dashboard()
 
+
+                                                              
+                  
+                                                              
 else:
 
+                                                                
+                                                      
     if "sim" not in st.session_state:
 
         st.session_state.sim = (
