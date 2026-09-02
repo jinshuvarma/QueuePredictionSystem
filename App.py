@@ -82,12 +82,6 @@ if "last_audio_time" not in st.session_state:
 if "browser_last_spoken" not in st.session_state:
     st.session_state.browser_last_spoken = ""
 
-if "live_alert_since" not in st.session_state:
-    st.session_state.live_alert_since = None
-
-if "live_alert_active" not in st.session_state:
-    st.session_state.live_alert_active = False
-
 
 # ============================================================
 # SIDEBAR
@@ -115,7 +109,7 @@ if st.session_state.current_mode != data_mode:
         ]
     )
 
-    # Do not carry Simulation alert/voice state into Live Camera.
+    # Never carry a Simulation alert into Live Camera (or vice versa).
     st.session_state.browser_last_spoken = ""
     st.session_state.live_alert_since = None
     st.session_state.live_alert_active = False
@@ -182,8 +176,8 @@ def point_in_polygon(point, polygon):
 class CentroidTracker:
     def __init__(
         self,
-        max_disappeared=12,
-        max_distance=90,
+        max_disappeared=6,
+        max_distance=85,
     ):
         self.next_object_id = 0
         self.objects = {}
@@ -539,22 +533,50 @@ class BrowserCameraProcessor:
                 results = self.model(
                     frame,
                     classes=[0],
-                    conf=0.35,
-                    imgsz=480,
-                    max_det=30,
+                    conf=0.55,
+                    imgsz=416,
+                    max_det=10,
                     verbose=False,
                 )[0]
 
                 boxes = []
                 centroids = []
 
-                for box in (
-                    results.boxes.xyxy
-                    .cpu()
-                    .numpy()
+                xyxy = (
+                    results.boxes.xyxy.cpu().numpy()
+                    if results.boxes is not None
+                    else []
+                )
+                cls_ids = (
+                    results.boxes.cls.cpu().numpy()
+                    if results.boxes is not None
+                    else []
+                )
+                confidences = (
+                    results.boxes.conf.cpu().numpy()
+                    if results.boxes is not None
+                    else []
+                )
+
+                for box, cls_id, confidence in zip(
+                    xyxy,
+                    cls_ids,
+                    confidences,
                 ):
+                    # Explicit COCO class-0 check: only PERSON.
+                    if int(cls_id) != 0 or float(confidence) < 0.55:
+                        continue
 
                     x1, y1, x2, y2 = box
+
+                    box_w = x2 - x1
+                    box_h = y2 - y1
+
+                    # Reject tiny / obviously non-person false positives.
+                    if box_h < 45 or box_w < 18:
+                        continue
+                    if box_w / max(box_h, 1.0) > 1.8:
+                        continue
 
                     centroids.append(
                         (
@@ -890,10 +912,9 @@ def render_state_and_actions(
     prefix,
     voice_enabled=False,
     actual_queue_count=None,
+    require_real_queue_threshold=False,
 ):
-    st.subheader(
-        "Live State Estimation"
-    )
+    st.subheader("Live State Estimation")
 
     display_df = state_df.rename(
         columns={
@@ -911,9 +932,7 @@ def render_state_and_actions(
         hide_index=True,
     )
 
-    st.subheader(
-        "Actions needs to be perform"
-    )
+    st.subheader("Actions needs to be perform")
 
     high_alert = None
 
@@ -941,23 +960,23 @@ def render_state_and_actions(
                 f"✅ {msg}"
             )
 
-    # --------------------------------------------------------
-    # LIVE-ONLY browser speech.
-    #
-    # We intentionally do NOT speak based on the forecast alert alone.
-    # A real queue must remain >= CROWD_THRESHOLD for several seconds.
-    # This prevents one person + an aggressive forecast from producing
-    # "ATTENTION: QUEUE FULL" during a 10–15 second demo.
-    # --------------------------------------------------------
-    if voice_enabled:
+    # Browser voice:
+    # Live camera => speak only when the REAL queue is large enough.
+    # Simulation => speak on a sustained high recommendation, useful for demo.
+    if voice_enabled and high_alert:
+
         now = time.time()
 
-        sustained_full = (
-            actual_queue_count is not None
-            and actual_queue_count >= CROWD_THRESHOLD
-        )
+        if require_real_queue_threshold:
+            alert_condition = (
+                actual_queue_count is not None
+                and actual_queue_count >= CROWD_THRESHOLD
+            )
+        else:
+            alert_condition = True
 
-        if sustained_full:
+        if alert_condition:
+
             if st.session_state.live_alert_since is None:
                 st.session_state.live_alert_since = now
 
@@ -966,34 +985,37 @@ def render_state_and_actions(
                 - st.session_state.live_alert_since
             )
 
-            if (
-                high_alert
-                and sustained_for >= LIVE_ALERT_SUSTAIN_SECONDS
-            ):
+            if sustained_for >= LIVE_ALERT_SUSTAIN_SECONDS:
+
                 clean_msg = (
                     high_alert
                     .split(" — ")[0]
-                    .replace("min", "minutes")
-                )
-
-                cooldown_ok = (
-                    st.session_state.live_alert_active is False
-                    or (
-                        now
-                        - (
-                            st.session_state.last_audio_time.timestamp()
-                            if st.session_state.last_audio_time != datetime.min
-                            else 0
-                        )
-                        >= AUDIO_COOLDOWN_SECONDS
+                    .replace(
+                        "min",
+                        "minutes",
                     )
                 )
 
+                last_spoken_time = (
+                    st.session_state.last_audio_time.timestamp()
+                    if st.session_state.last_audio_time != datetime.min
+                    else 0
+                )
+
+                cooldown_ok = (
+                    now - last_spoken_time
+                    >= AUDIO_COOLDOWN_SECONDS
+                )
+
+                # Same alert is not repeated until cooldown expires.
                 if (
-                    clean_msg
-                    != st.session_state.browser_last_spoken
-                    and cooldown_ok
+                    (
+                        clean_msg
+                        != st.session_state.browser_last_spoken
+                    )
+                    or cooldown_ok
                 ):
+
                     components.html(
                         f"""
                         <script>
@@ -1022,16 +1044,17 @@ def render_state_and_actions(
 
                     st.session_state.browser_last_spoken = clean_msg
                     st.session_state.last_audio_time = datetime.now()
-                    st.session_state.live_alert_active = True
 
         else:
-            # Queue dropped below the real threshold: reset sustained alert state.
             st.session_state.live_alert_since = None
-            st.session_state.live_alert_active = False
-            st.session_state.browser_last_spoken = ""
+
+    else:
+        st.session_state.live_alert_since = None
+        st.session_state.live_alert_active = False
+        st.session_state.browser_last_spoken = ""
 
     with st.expander(
-        "🔊 Voice Alert",
+        "Voice Alert",
         expanded=False,
     ):
         if st.button(
@@ -1050,7 +1073,6 @@ def render_state_and_actions(
 
                 u.rate = 0.95;
                 u.volume = 1.0;
-
                 window.speechSynthesis.speak(u);
                 </script>
                 """,
@@ -1181,9 +1203,8 @@ if data_mode == "Live Camera":
 
     processor = get_browser_processor()
 
-    st.info(
-        "📷 Click START below and allow camera permission. "
-        "The browser camera is processed with YOLO in real time."
+    st.caption(
+        "Click START and allow camera permission."
     )
 
     c_left, c_right = st.columns(
@@ -1194,7 +1215,7 @@ if data_mode == "Live Camera":
     with c_left:
 
         st.subheader(
-            "📷 Live Camera"
+            "Camera"
         )
 
         rtc_ctx = webrtc_streamer(
@@ -1204,16 +1225,16 @@ if data_mode == "Live Camera":
             media_stream_constraints={
                 "video": {
                     "width": {
-                        "ideal": 960,
-                        "max": 1280,
+                        "ideal": 640,
+                        "max": 640,
                     },
                     "height": {
-                        "ideal": 540,
-                        "max": 720,
+                        "ideal": 360,
+                        "max": 360,
                     },
                     "frameRate": {
-                        "ideal": 20,
-                        "max": 24,
+                        "ideal": 15,
+                        "max": 18,
                     },
                 },
                 "audio": False,
@@ -1233,7 +1254,7 @@ if data_mode == "Live Camera":
         if rtc_ctx.state.playing:
 
             st.success(
-                "🟢 Camera connected — YOLO detection is running"
+                "Camera connected — YOLO detection is running"
             )
 
         else:
@@ -1338,6 +1359,7 @@ if data_mode == "Live Camera":
                 prefix="live",
                 voice_enabled=True,
                 actual_queue_count=actual_queue_count,
+                require_real_queue_threshold=True,
             )
 
         with live_forecast_placeholder.container():
@@ -1484,12 +1506,19 @@ else:
 
     st.markdown("---")
 
+    simulation_queue_count = int(
+        state_df["people_in_queue"].sum()
+        if not state_df.empty
+        else 0
+    )
+
     render_state_and_actions(
         state_df,
         recommendations,
         prefix="simulation",
-        voice_enabled=False,
-        actual_queue_count=None,
+        voice_enabled=True,
+        actual_queue_count=simulation_queue_count,
+        require_real_queue_threshold=False,
     )
 
     st.markdown("---")
