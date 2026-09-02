@@ -136,7 +136,7 @@ if "history_df" not in st.session_state:
 
 
 # ============================================================
-# LIVE CAMERA TRACKER
+# LIGHTWEIGHT GEOMETRY / TRACKER
 # ============================================================
 def point_in_polygon(point, polygon):
     x, y = point
@@ -166,28 +166,55 @@ def point_in_polygon(point, polygon):
 
 
 class CentroidTracker:
-    def __init__(self, max_disappeared=20, max_distance=80):
+    def __init__(
+        self,
+        max_disappeared=12,
+        max_distance=90,
+    ):
         self.next_object_id = 0
         self.objects = {}
         self.disappeared = {}
+
         self.max_disappeared = max_disappeared
         self.max_distance = max_distance
 
     def register(self, centroid):
-        self.objects[self.next_object_id] = tuple(centroid)
-        self.disappeared[self.next_object_id] = 0
+        self.objects[self.next_object_id] = tuple(
+            centroid
+        )
+        self.disappeared[
+            self.next_object_id
+        ] = 0
+
         self.next_object_id += 1
 
     def deregister(self, object_id):
-        self.objects.pop(object_id, None)
-        self.disappeared.pop(object_id, None)
+        self.objects.pop(
+            object_id,
+            None,
+        )
+
+        self.disappeared.pop(
+            object_id,
+            None,
+        )
 
     def update(self, input_centroids):
         if len(input_centroids) == 0:
-            for object_id in list(self.disappeared):
-                self.disappeared[object_id] += 1
 
-                if self.disappeared[object_id] > self.max_disappeared:
+            for object_id in list(
+                self.disappeared
+            ):
+                self.disappeared[
+                    object_id
+                ] += 1
+
+                if (
+                    self.disappeared[
+                        object_id
+                    ]
+                    > self.max_disappeared
+                ):
                     self.deregister(object_id)
 
             return dict(self.objects)
@@ -198,15 +225,21 @@ class CentroidTracker:
         )
 
         if len(self.objects) == 0:
+
             for centroid in input_centroids:
                 self.register(centroid)
 
             return dict(self.objects)
 
-        object_ids = list(self.objects.keys())
+        object_ids = list(
+            self.objects.keys()
+        )
 
         object_centroids = np.asarray(
-            [self.objects[i] for i in object_ids],
+            [
+                self.objects[i]
+                for i in object_ids
+            ],
             dtype=np.float32,
         )
 
@@ -216,45 +249,70 @@ class CentroidTracker:
             axis=2,
         )
 
-        rows = distances.min(axis=1).argsort()
-        cols = distances.argmin(axis=1)[rows]
+        rows = distances.min(
+            axis=1
+        ).argsort()
+
+        cols = distances.argmin(
+            axis=1
+        )[rows]
 
         used_rows = set()
         used_cols = set()
 
-        for row, col in zip(rows, cols):
-            if row in used_rows or col in used_cols:
+        for row, col in zip(
+            rows,
+            cols,
+        ):
+            if (
+                row in used_rows
+                or col in used_cols
+            ):
                 continue
 
-            if distances[row, col] > self.max_distance:
+            if (
+                distances[row, col]
+                > self.max_distance
+            ):
                 continue
 
             object_id = object_ids[row]
 
-            self.objects[object_id] = tuple(
+            self.objects[
+                object_id
+            ] = tuple(
                 input_centroids[col]
             )
 
-            self.disappeared[object_id] = 0
+            self.disappeared[
+                object_id
+            ] = 0
 
             used_rows.add(row)
             used_cols.add(col)
 
         unused_rows = (
-            set(range(len(object_ids))) - used_rows
+            set(range(len(object_ids)))
+            - used_rows
         )
 
         unused_cols = (
-            set(range(len(input_centroids))) - used_cols
+            set(range(len(input_centroids)))
+            - used_cols
         )
 
         for row in unused_rows:
+
             object_id = object_ids[row]
 
-            self.disappeared[object_id] += 1
+            self.disappeared[
+                object_id
+            ] += 1
 
             if (
-                self.disappeared[object_id]
+                self.disappeared[
+                    object_id
+                ]
                 > self.max_disappeared
             ):
                 self.deregister(object_id)
@@ -267,6 +325,9 @@ class CentroidTracker:
         return dict(self.objects)
 
 
+# ============================================================
+# LIVE CAMERA PROCESSOR
+# ============================================================
 CAMERA_ZONE = [
     (242, 472),
     (244, 4),
@@ -277,18 +338,16 @@ CAMERA_ZONE = [
 
 
 class BrowserCameraProcessor:
-    """
-    Browser-camera processing.
-
-    The WebRTC callback receives camera frames from the user's browser.
-    YOLO runs periodically, while ROI/detections from the latest inference
-    are drawn on every outgoing frame so the overlay does not blink.
-    """
 
     def __init__(self, zone):
+
         self.zone = zone
 
-        self.model = YOLO("yolov8n.pt")
+        # Model is created once per cached processor.
+        self.model = YOLO(
+            "yolov8n.pt"
+        )
+
         self.tracker = CentroidTracker()
 
         self.entry_ts = {}
@@ -306,22 +365,38 @@ class BrowserCameraProcessor:
 
         self.lock = threading.Lock()
 
-        self.frame_count = 0
+        # Latest input/output frames.
+        self.latest_input = None
+        self.latest_output = None
 
-        # Lower value = more YOLO work. 4 is a reasonable cloud compromise.
-        self.inference_interval = 4
+        self.frame_counter = 0
 
-        # Persist detections between inference frames.
-        self.last_boxes = []
-        self.last_centroids = []
-        self.last_objects = {}
+        # Do not let inference queue build up.
+        self.inference_every_n_frames = 2
 
-    def _scaled_zone(self, width, height):
+        self.worker_running = True
+        self.worker_busy = False
+
+        self.worker = threading.Thread(
+            target=self._inference_worker,
+            daemon=True,
+        )
+
+        self.worker.start()
+
+    def _scaled_zone(
+        self,
+        width,
+        height,
+    ):
         sx = width / 514.0
         sy = height / 475.0
 
         return [
-            (int(x * sx), int(y * sy))
+            (
+                int(x * sx),
+                int(y * sy),
+            )
             for x, y in self.zone
         ]
 
@@ -340,7 +415,7 @@ class BrowserCameraProcessor:
             dtype=np.int32,
         )
 
-        # Draw ROI on every frame -> no blinking/flickering.
+        # ROI is ALWAYS drawn. This removes blinking.
         overlay = img.copy()
 
         cv2.fillPoly(
@@ -366,11 +441,11 @@ class BrowserCameraProcessor:
             3,
         )
 
-        # Latest YOLO boxes.
         for box, centroid in zip(
             boxes,
             centroids,
         ):
+
             x1, y1, x2, y2 = box
 
             in_zone = point_in_polygon(
@@ -392,8 +467,8 @@ class BrowserCameraProcessor:
                 2,
             )
 
-        # Latest tracking IDs.
         for object_id, centroid in objects.items():
+
             cv2.putText(
                 img,
                 f"ID: {object_id}",
@@ -419,140 +494,157 @@ class BrowserCameraProcessor:
 
         return img
 
-    def process(self, frame):
-        img = frame.to_ndarray(
-            format="bgr24"
-        )
+    def _inference_worker(self):
 
-        self.frame_count += 1
+        import cv2
 
-        h, w = img.shape[:2]
+        while self.worker_running:
 
-        zone = self._scaled_zone(
-            w,
-            h,
-        )
+            frame = None
 
-        # -----------------------------------------------
-        # Run YOLO every Nth frame.
-        # -----------------------------------------------
-        if (
-            self.frame_count
-            % self.inference_interval
-            == 0
-        ):
-            results = self.model(
-                img,
-                classes=[0],
-                conf=0.35,
-                imgsz=640,
-                verbose=False,
-            )[0]
+            # Take the newest frame and immediately clear the input slot.
+            with self.lock:
+                if self.latest_input is not None:
+                    frame = self.latest_input
+                    self.latest_input = None
+                    self.worker_busy = True
 
-            boxes = []
-            centroids = []
+            if frame is None:
+                time.sleep(0.005)
+                continue
 
-            for box in (
-                results.boxes.xyxy
-                .cpu()
-                .numpy()
-            ):
-                x1, y1, x2, y2 = box
+            try:
 
-                centroids.append(
-                    (
-                        (x1 + x2) / 2,
-                        (y1 + y2) / 2,
-                    )
+                h, w = frame.shape[:2]
+
+                zone = self._scaled_zone(
+                    w,
+                    h,
                 )
 
-                boxes.append(
-                    (
-                        int(x1),
-                        int(y1),
-                        int(x2),
-                        int(y2),
-                    )
-                )
+                results = self.model(
+                    frame,
+                    classes=[0],
+                    conf=0.35,
+                    imgsz=480,
+                    max_det=30,
+                    verbose=False,
+                )[0]
 
-            objects = self.tracker.update(
-                centroids
-            )
+                boxes = []
+                centroids = []
 
-            current_ids = set()
-            arrivals = 0
-            served = 0
-            now = time.time()
-
-            for object_id, centroid in objects.items():
-
-                if point_in_polygon(
-                    tuple(centroid),
-                    zone,
+                for box in (
+                    results.boxes.xyxy
+                    .cpu()
+                    .numpy()
                 ):
-                    current_ids.add(object_id)
+
+                    x1, y1, x2, y2 = box
+
+                    centroids.append(
+                        (
+                            (x1 + x2) / 2,
+                            (y1 + y2) / 2,
+                        )
+                    )
+
+                    boxes.append(
+                        (
+                            int(x1),
+                            int(y1),
+                            int(x2),
+                            int(y2),
+                        )
+                    )
+
+                objects = self.tracker.update(
+                    centroids
+                )
+
+                current_ids = set()
+                now = time.time()
+
+                for object_id, centroid in objects.items():
+
+                    if point_in_polygon(
+                        tuple(centroid),
+                        zone,
+                    ):
+
+                        current_ids.add(
+                            object_id
+                        )
+
+                        if (
+                            object_id
+                            not in self.entry_ts
+                        ):
+
+                            self.entry_ts[
+                                object_id
+                            ] = now
+
+                new_ids = (
+                    current_ids
+                    - self.seen_ids
+                )
+
+                left_ids = (
+                    self.seen_ids
+                    - current_ids
+                )
+
+                arrivals = len(new_ids)
+                served = 0
+
+                for object_id in left_ids:
 
                     if (
                         object_id
-                        not in self.entry_ts
+                        in self.entry_ts
                     ):
-                        self.entry_ts[
-                            object_id
-                        ] = now
 
-            new_ids = (
-                current_ids
-                - self.seen_ids
-            )
+                        dwell_min = (
+                            now
+                            - self.entry_ts.pop(
+                                object_id
+                            )
+                        ) / 60.0
 
-            left_ids = (
-                self.seen_ids
-                - current_ids
-            )
+                        if dwell_min >= 0.5:
 
-            arrivals = len(new_ids)
+                            served += 1
 
-            for object_id in left_ids:
+                            self.service_times.append(
+                                dwell_min
+                            )
 
-                if object_id in self.entry_ts:
+                self.seen_ids = current_ids
 
-                    dwell_min = (
-                        now
-                        - self.entry_ts.pop(
-                            object_id
-                        )
-                    ) / 60.0
+                recent_service = (
+                    self.service_times[
+                        -20:
+                    ]
+                )
 
-                    if dwell_min >= 0.5:
+                avg_service_time = (
+                    sum(recent_service)
+                    / len(recent_service)
+                    if recent_service
+                    else 2.5
+                )
 
-                        served += 1
+                # Make the annotated output from this latest inference.
+                annotated = self._draw_overlay(
+                    frame.copy(),
+                    zone,
+                    boxes,
+                    centroids,
+                    objects,
+                )
 
-                        self.service_times.append(
-                            dwell_min
-                        )
-
-            self.seen_ids = current_ids
-
-            recent_service = (
-                self.service_times[-20:]
-            )
-
-            avg_service_time = (
-                sum(recent_service)
-                / len(recent_service)
-                if recent_service
-                else 2.5
-            )
-
-            # Persist detection state.
-            self.last_boxes = boxes
-            self.last_centroids = centroids
-            self.last_objects = objects
-
-            # Persist live analytics state.
-            with self.lock:
-
-                self.latest_row = {
+                row = {
                     "timestamp": datetime.now(),
                     "counter_id": "Counter 1",
                     "people_in_queue": len(
@@ -566,19 +658,101 @@ class BrowserCameraProcessor:
                     ),
                 }
 
-        # -----------------------------------------------
-        # Always draw latest state on every frame.
-        # -----------------------------------------------
-        annotated = self._draw_overlay(
-            img,
-            zone,
-            self.last_boxes,
-            self.last_centroids,
-            self.last_objects,
+                with self.lock:
+
+                    self.last_boxes = boxes
+                    self.last_centroids = centroids
+                    self.last_objects = objects
+
+                    self.latest_row = row
+
+                    self.latest_output = (
+                        annotated
+                    )
+
+            except Exception as e:
+
+                print(
+                    f"YOLO worker error: {e}"
+                )
+
+            finally:
+
+                with self.lock:
+                    self.worker_busy = False
+
+    def process(self, frame):
+
+        img = frame.to_ndarray(
+            format="bgr24"
         )
 
+        self.frame_counter += 1
+
+        # Keep only the newest frame.
+        # This is the main latency fix: old frames are discarded.
+        if (
+            self.frame_counter
+            % self.inference_every_n_frames
+            == 0
+        ):
+
+            with self.lock:
+
+                self.latest_input = img.copy()
+
+        # Always return the newest processed frame.
+        # If inference hasn't finished yet, return the raw current frame
+        # with the last known overlay state.
+        with self.lock:
+
+            latest_output = (
+                None
+                if self.latest_output is None
+                else self.latest_output.copy()
+            )
+
+            boxes = getattr(
+                self,
+                "last_boxes",
+                [],
+            )
+
+            centroids = getattr(
+                self,
+                "last_centroids",
+                [],
+            )
+
+            objects = getattr(
+                self,
+                "last_objects",
+                {},
+            )
+
+        if latest_output is not None:
+            # Re-apply ROI to the current frame so ROI never freezes.
+            h, w = img.shape[:2]
+            zone = self._scaled_zone(
+                w,
+                h,
+            )
+
+            annotated = self._draw_overlay(
+                img,
+                zone,
+                boxes,
+                centroids,
+                objects,
+            )
+
+            return av.VideoFrame.from_ndarray(
+                annotated,
+                format="bgr24",
+            )
+
         return av.VideoFrame.from_ndarray(
-            annotated,
+            img,
             format="bgr24",
         )
 
@@ -591,96 +765,263 @@ def get_browser_processor():
 
 
 # ============================================================
-# PAGE TITLE + PLACEHOLDERS
+# HEADER
 # ============================================================
-st.title("VisionAI Queue Manager")
+st.title(
+    "VisionAI Queue Manager"
+)
 
 st.markdown(
     "Real-time computer vision queue tracking, "
     "forecasting, and automated load balancing."
 )
 
-# Placeholders preserve the original UI order while allowing
-# the fragment below to update values without restarting WebRTC.
-metrics_slot = st.empty()
-st.markdown("---")
-
 
 # ============================================================
-# MAIN TWO-COLUMN LAYOUT
+# DATA / UI HELPERS
 # ============================================================
-c_left, c_right = st.columns(
-    [1.2, 1],
-    gap="large",
-)
+def calculate_analytics(history):
+    state_df = compute_counter_states(
+        history
+    )
 
-with c_left:
-    st.subheader("📷 Camera")
+    forecasts = forecast_all_counters(
+        history,
+        steps=FORECAST_STEPS,
+    )
 
-    if data_mode == "Live Camera":
-
-        processor = get_browser_processor()
-
-        st.caption(
-            "Browser camera • YOLO person detection • Queue ROI tracking"
+    forecast_alerts = {
+        counter: threshold_alert(
+            forecast,
+            CROWD_THRESHOLD,
         )
+        for counter, forecast
+        in forecasts.items()
+    }
 
-        rtc_ctx = webrtc_streamer(
-            key="visionai-live-camera-v3",
-            mode=WebRtcMode.SENDRECV,
-            video_frame_callback=processor.process,
-            media_stream_constraints={
-                "video": {
-                    "width": {"ideal": 1280},
-                    "height": {"ideal": 720},
-                    "frameRate": {"ideal": 20},
-                },
-                "audio": False,
-            },
-            async_processing=True,
-            rtc_configuration={
-                "iceServers": [
-                    {
-                        "urls": [
-                            "stun:stun.l.google.com:19302"
-                        ]
-                    }
-                ]
-            },
+    recommendations = (
+        generate_recommendations(
+            state_df,
+            forecast_alerts,
         )
+    )
 
-        camera_status_slot = st.empty()
+    return (
+        state_df,
+        forecasts,
+        recommendations,
+    )
 
-        if rtc_ctx.state.playing:
-            camera_status_slot.success(
-                "🟢 Camera connected — YOLO detection is running"
+
+def render_metrics(state_df):
+    col1, col2, col3, col4 = (
+        st.columns(4)
+    )
+
+    total_waiting = (
+        state_df[
+            "people_in_queue"
+        ].sum()
+        if not state_df.empty
+        else 0
+    )
+
+    max_wait = (
+        state_df[
+            "estimated_wait_min"
+        ].max()
+        if not state_df.empty
+        else 0
+    )
+
+    busiest_counter = (
+        state_df.loc[
+            state_df[
+                "estimated_wait_min"
+            ].idxmax()
+        ]["counter_id"]
+        if not state_df.empty
+        else "N/A"
+    )
+
+    col1.metric(
+        "Total People Waiting",
+        total_waiting,
+    )
+
+    col2.metric(
+        "Max Wait Time",
+        f"{max_wait:.1f} min",
+    )
+
+    col3.metric(
+        "Busiest Node",
+        busiest_counter,
+    )
+
+    col4.metric(
+        "System Status",
+        (
+            "CRITICAL"
+            if total_waiting
+            > CROWD_THRESHOLD
+            else "OPTIMAL"
+        ),
+    )
+
+
+def render_state_and_actions(
+    state_df,
+    recommendations,
+    prefix,
+):
+
+    st.subheader(
+        "Live State Estimation"
+    )
+
+    display_df = state_df.rename(
+        columns={
+            "counter_id": "Node",
+            "people_in_queue": "Queue Len",
+            "arrival_rate_per_min": "Arrivals/m",
+            "avg_service_time_min": "Service(m)",
+            "estimated_wait_min": "Est. Wait(m)",
+        }
+    )
+
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader(
+        "Actions needs to be perform"
+    )
+
+    current_time = datetime.now()
+    high_alert = None
+
+    for severity, msg in recommendations:
+
+        if severity == "high":
+
+            st.error(
+                f"ACTION REQUIRED: {msg}"
             )
+
+            if high_alert is None:
+                high_alert = msg
+
+        elif severity == "medium":
+
+            st.warning(
+                f"⚠️ {msg}"
+            )
+
+        elif severity == "warning":
+
+            st.info(
+                f"⏳ {msg}"
+            )
+
         else:
-            camera_status_slot.info(
-                "Click **START** above and allow camera permission."
+
+            st.success(
+                f"✅ {msg}"
             )
 
-    else:
-        processor = None
+    # Browser-side speech. This is audible on the evaluator's browser,
+    # unlike pyttsx3 running on the Streamlit server.
+    if high_alert:
 
-        st.info(
-            "Visual intelligence disabled in Simulation Mode. "
-            "Switch to Live Camera in the sidebar."
+        clean_msg = (
+            high_alert
+            .split(" — ")[0]
+            .replace(
+                "min",
+                "minutes",
+            )
         )
 
+        if (
+            clean_msg
+            != st.session_state.browser_last_spoken
+        ):
 
-with c_right:
-    state_slot = st.empty()
-    actions_slot = st.empty()
+            components.html(
+                f"""
+                <script>
+                (() => {{
+                    const text = {json.dumps(
+                        "Attention please. "
+                        + clean_msg
+                    )};
+
+                    try {{
+                        window.speechSynthesis.cancel();
+
+                        const u =
+                            new SpeechSynthesisUtterance(text);
+
+                        u.rate = 0.95;
+                        u.pitch = 1.0;
+                        u.volume = 1.0;
+
+                        window.speechSynthesis.speak(u);
+                    }} catch (e) {{
+                        console.log(e);
+                    }}
+                }})();
+                </script>
+                """,
+                height=1,
+            )
+
+            st.session_state.browser_last_spoken = (
+                clean_msg
+            )
+
+            st.session_state.last_audio_time = (
+                current_time
+            )
+
+    with st.expander(
+        "🔊 Voice Alert",
+        expanded=False,
+    ):
+
+        if st.button(
+            "Test Voice",
+            key=f"{prefix}_voice_test",
+        ):
+
+            components.html(
+                """
+                <script>
+                window.speechSynthesis.cancel();
+
+                const u =
+                    new SpeechSynthesisUtterance(
+                        "VisionAI voice alert system is working."
+                    );
+
+                u.rate = 0.95;
+                u.volume = 1.0;
+
+                window.speechSynthesis.speak(u);
+                </script>
+                """,
+                height=1,
+            )
 
 
-forecast_slot = st.empty()
+def build_forecast_chart(
+    history,
+    forecasts,
+):
 
-
-# ============================================================
-# RENDER LIVE DATA
-# ============================================================
-def build_forecast_chart(history, forecasts):
     fig = go.Figure()
 
     colors = {
@@ -693,16 +1034,24 @@ def build_forecast_chart(history, forecasts):
 
         group = (
             history[
-                history["counter_id"]
+                history[
+                    "counter_id"
+                ]
                 == counter
             ]
-            .sort_values("timestamp")
+            .sort_values(
+                "timestamp"
+            )
         )
 
         fig.add_trace(
             go.Scatter(
-                x=group["timestamp"],
-                y=group["people_in_queue"],
+                x=group[
+                    "timestamp"
+                ],
+                y=group[
+                    "people_in_queue"
+                ],
                 mode="lines",
                 name=f"{counter} (Actual)",
                 line=dict(
@@ -718,7 +1067,9 @@ def build_forecast_chart(history, forecasts):
         if counter in forecasts:
 
             last_ts = (
-                group["timestamp"].iloc[-1]
+                group[
+                    "timestamp"
+                ].iloc[-1]
                 if not group.empty
                 else pd.Timestamp.now()
             )
@@ -737,7 +1088,9 @@ def build_forecast_chart(history, forecasts):
             fig.add_trace(
                 go.Scatter(
                     x=future_ts,
-                    y=forecasts[counter],
+                    y=forecasts[
+                        counter
+                    ],
                     mode="lines",
                     name=f"{counter} (Forecast)",
                     line=dict(
@@ -779,27 +1132,93 @@ def build_forecast_chart(history, forecasts):
     return fig
 
 
-def render_dashboard_once():
-    """
-    Refreshable dashboard body.
+# ============================================================
+# MODE: LIVE CAMERA
+# ============================================================
+if data_mode == "Live Camera":
 
-    The key point is that this function reads the latest row written by the
-    WebRTC callback and rebuilds ONLY the dashboard widgets. The browser camera
-    itself is not restarted.
-    """
+    processor = get_browser_processor()
 
-    # -----------------------------------------------
-    # Select current data source.
-    # -----------------------------------------------
-    if data_mode == "Simulation":
+    st.info(
+        "📷 Click START below and allow camera permission. "
+        "The browser camera is processed with YOLO in real time."
+    )
 
-        sim = st.session_state.sim
+    c_left, c_right = st.columns(
+        [1.2, 1],
+        gap="large",
+    )
 
-        sim.tick()
+    with c_left:
 
-        history = sim.history_df()
+        st.subheader(
+            "📷 Live Camera"
+        )
 
-    else:
+        rtc_ctx = webrtc_streamer(
+            key="visionai-live-camera-v4",
+            mode=WebRtcMode.SENDRECV,
+            video_frame_callback=processor.process,
+            media_stream_constraints={
+                "video": {
+                    "width": {
+                        "ideal": 960,
+                        "max": 1280,
+                    },
+                    "height": {
+                        "ideal": 540,
+                        "max": 720,
+                    },
+                    "frameRate": {
+                        "ideal": 20,
+                        "max": 24,
+                    },
+                },
+                "audio": False,
+            },
+            async_processing=True,
+            rtc_configuration={
+                "iceServers": [
+                    {
+                        "urls": [
+                            "stun:stun.l.google.com:19302"
+                        ]
+                    }
+                ]
+            },
+        )
+
+        if rtc_ctx.state.playing:
+
+            st.success(
+                "🟢 Camera connected — YOLO detection is running"
+            )
+
+        else:
+
+            st.caption(
+                "Camera is waiting. Click START and allow access."
+            )
+
+    with c_right:
+
+        # Initial placeholder. The actual numbers are refreshed below.
+        live_state_placeholder = st.empty()
+        live_actions_placeholder = st.empty()
+
+    st.markdown("---")
+
+    live_metrics_placeholder = st.empty()
+    live_forecast_placeholder = st.empty()
+
+    @st.fragment(
+        run_every=(
+            refresh_secs
+            if auto_refresh
+            else None
+        )
+    )
+    def live_dashboard():
 
         with processor.lock:
             live_row = dict(
@@ -810,7 +1229,9 @@ def render_dashboard_once():
             [live_row]
         )
 
-        if st.session_state.history_df.empty:
+        if (
+            st.session_state.history_df.empty
+        ):
 
             st.session_state.history_df = (
                 live_df
@@ -853,322 +1274,91 @@ def render_dashboard_once():
             st.session_state.history_df
         )
 
-    # -----------------------------------------------
-    # Analytics
-    # -----------------------------------------------
-    state_df = compute_counter_states(
-        history
-    )
-
-    forecasts = forecast_all_counters(
-        history,
-        steps=FORECAST_STEPS,
-    )
-
-    forecast_alerts = {
-        counter: threshold_alert(
-            forecast,
-            CROWD_THRESHOLD,
+        state_df, forecasts, recommendations = (
+            calculate_analytics(
+                history
+            )
         )
-        for counter, forecast
-        in forecasts.items()
-    }
 
-    recommendations = (
-        generate_recommendations(
-            state_df,
-            forecast_alerts,
-        )
-    )
+        with live_metrics_placeholder.container():
+            render_metrics(state_df)
 
-    # -----------------------------------------------
-    # Metrics
-    # -----------------------------------------------
-    with metrics_slot.container():
+        with live_state_placeholder.container():
+            render_state_and_actions(
+                state_df,
+                recommendations,
+                prefix="live",
+            )
 
-        col1, col2, col3, col4 = st.columns(4)
+        with live_forecast_placeholder.container():
 
-        total_waiting = (
+            st.subheader(
+                "📈 Queue Trajectory & AI Forecast"
+            )
+
+            fig = build_forecast_chart(
+                history,
+                forecasts,
+            )
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+            )
+
+        signage_data = {
+            "status": "NORMAL",
+            "message": "✅ PLEASE WAIT IN LINE",
+            "color": "#0a2911",
+        }
+
+        stuck_counters = state_df[
             state_df[
-                "people_in_queue"
-            ].sum()
-            if not state_df.empty
-            else 0
-        )
+                "avg_service_time_min"
+            ]
+            > 5.0
+        ]
 
-        max_wait = (
-            state_df[
-                "estimated_wait_min"
-            ].max()
-            if not state_df.empty
-            else 0
-        )
+        if not stuck_counters.empty:
 
-        busiest_counter = (
-            state_df.loc[
-                state_df[
-                    "estimated_wait_min"
-                ].idxmax()
-            ]["counter_id"]
-            if not state_df.empty
-            else "N/A"
-        )
-
-        col1.metric(
-            "Total People Waiting",
-            total_waiting,
-        )
-
-        col2.metric(
-            "Max Wait Time",
-            f"{max_wait:.1f} min",
-        )
-
-        col3.metric(
-            "Busiest Node",
-            busiest_counter,
-        )
-
-        col4.metric(
-            "System Status",
-            (
-                "CRITICAL"
-                if total_waiting
-                > CROWD_THRESHOLD
-                else "OPTIMAL"
-            ),
-        )
-
-    # -----------------------------------------------
-    # State table
-    # -----------------------------------------------
-    with state_slot.container():
-
-        st.subheader(
-            "Live State Estimation"
-        )
-
-        display_df = (
-            state_df.rename(
-                columns={
-                    "counter_id": "Node",
-                    "people_in_queue": "Queue Len",
-                    "arrival_rate_per_min": "Arrivals/m",
-                    "avg_service_time_min": "Service(m)",
-                    "estimated_wait_min": "Est. Wait(m)",
-                }
-            )
-        )
-
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    # -----------------------------------------------
-    # Recommendations + browser voice alerts
-    # -----------------------------------------------
-    with actions_slot.container():
-
-        st.subheader(
-            "Actions needs to be perform"
-        )
-
-        current_time = datetime.now()
-
-        high_alert_message = None
-
-        for severity, msg in recommendations:
-
-            if severity == "high":
-
-                st.error(
-                    f"ACTION REQUIRED: {msg}"
-                )
-
-                if high_alert_message is None:
-                    high_alert_message = msg
-
-            elif severity == "medium":
-
-                st.warning(
-                    f"⚠️ {msg}"
-                )
-
-            elif severity == "warning":
-
-                st.info(
-                    f"⏳ {msg}"
-                )
-
-            else:
-
-                st.success(
-                    f"✅ {msg}"
-                )
-
-        # pyttsx3 speaks on the Streamlit Cloud server, not on the
-        # evaluator's laptop. Use the browser's SpeechSynthesis API instead.
-        if high_alert_message:
-
-            clean_msg = (
-                high_alert_message
-                .split(" — ")[0]
-                .replace("min", "minutes")
+            signage_data["message"] = (
+                "⚡ EXPRESS LANE OPEN AT "
+                "COUNTER 2 (Max 2 Items)"
             )
 
-            # Speak only when the alert message changes.
-            # The dashboard fragment can rerun every second without
-            # repeating the same alert continuously.
-            if (
-                clean_msg
-                != st.session_state.browser_last_spoken
-            ):
-                components.html(
-                    f"""
-                    <script>
-                    (function() {{
-                        const message = {json.dumps(
-                            "Attention please. " + clean_msg
-                        )};
-
-                        try {{
-                            window.speechSynthesis.cancel();
-
-                            const utterance =
-                                new SpeechSynthesisUtterance(message);
-
-                            utterance.rate = 0.95;
-                            utterance.pitch = 1.0;
-                            utterance.volume = 1.0;
-
-                            window.speechSynthesis.speak(utterance);
-                        }} catch (e) {{
-                            console.log("Browser voice unavailable:", e);
-                        }}
-                    }})();
-                    </script>
-                    """,
-                    height=1,
-                )
-
-                st.session_state.browser_last_spoken = clean_msg
-                st.session_state.last_audio_time = current_time
-
-        # Helpful one-click test for the evaluator/browser.
-        with st.expander("🔊 Voice Alert", expanded=False):
-            st.write(
-                "Use this once to verify that browser voice alerts are enabled."
-            )
-            if st.button(
-                "Test Voice",
-                key="test_voice_button",
-            ):
-                components.html(
-                    """
-                    <script>
-                    window.speechSynthesis.cancel();
-                    const u = new SpeechSynthesisUtterance(
-                        "VisionAI voice alert system is working."
-                    );
-                    u.rate = 0.95;
-                    u.volume = 1.0;
-                    window.speechSynthesis.speak(u);
-                    </script>
-                    """,
-                    height=1,
-                )
-
-    # -----------------------------------------------
-    # Forecast graph
-    # -----------------------------------------------
-    with forecast_slot.container():
-
-        st.markdown("---")
-
-        st.subheader(
-            "📈 Queue Trajectory & AI Forecast"
-        )
-
-        fig = build_forecast_chart(
-            history,
-            forecasts,
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True,
-        )
-
-    # -----------------------------------------------
-    # Digital signage state file
-    # -----------------------------------------------
-    signage_data = {
-        "status": "NORMAL",
-        "message": "✅ PLEASE WAIT IN LINE",
-        "color": "#0a2911",
-    }
-
-    stuck_counters = state_df[
-        state_df["avg_service_time_min"]
-        > 5.0
-    ]
-
-    if not stuck_counters.empty:
-
-        signage_data["message"] = (
-            "⚡ EXPRESS LANE OPEN AT "
-            "COUNTER 2 (Max 2 Items)"
-        )
-
-        signage_data["color"] = "#b58900"
-
-    else:
-
-        for severity, msg in recommendations:
-
-            if severity == "high":
-
-                signage_data["status"] = "FULL"
-                signage_data["message"] = (
-                    f"🚨 {msg.upper()}"
-                )
-                signage_data["color"] = "#4a0404"
-                break
-
-    try:
-        with open(
-            "shared_state.json",
-            "w",
-        ) as file:
-
-            json.dump(
-                signage_data,
-                file,
+            signage_data["color"] = (
+                "#b58900"
             )
 
-    except Exception:
-        pass
+        else:
 
-    # -----------------------------------------------
-    # Simulation sidebar report
-    # -----------------------------------------------
-    if data_mode == "Simulation":
+            for severity, msg in recommendations:
 
-        csv_data = history.to_csv(
-            index=False
-        ).encode("utf-8")
+                if severity == "high":
 
-        st.sidebar.download_button(
-            label="📥 Download Shift Audit Report",
-            data=csv_data,
-            file_name="queue_performance_report.csv",
-            mime="text/csv",
-            key="simulation_audit_download",
-        )
+                    signage_data["status"] = "FULL"
+                    signage_data["message"] = (
+                        f"🚨 {msg.upper()}"
+                    )
+                    signage_data["color"] = (
+                        "#4a0404"
+                    )
+                    break
 
-    else:
+        try:
+
+            with open(
+                "shared_state.json",
+                "w",
+            ) as file:
+
+                json.dump(
+                    signage_data,
+                    file,
+                )
+
+        except Exception:
+            pass
 
         csv_data = history.to_csv(
             index=False
@@ -1182,24 +1372,34 @@ def render_dashboard_once():
             key="live_audit_download",
         )
 
+    live_dashboard()
+
 
 # ============================================================
-# SIMULATION INITIALIZATION
+# MODE: SIMULATION
 # ============================================================
-if data_mode == "Simulation":
+else:
 
+    # No camera component is rendered at all in Simulation Mode.
+    # This keeps the demo dashboard clean and focused.
     if "sim" not in st.session_state:
 
-        st.session_state.sim = QueueSimulator(
-            COUNTERS,
-            seed=42,
+        st.session_state.sim = (
+            QueueSimulator(
+                COUNTERS,
+                seed=42,
+            )
         )
 
         for _ in range(10):
             st.session_state.sim.tick()
 
+    sim = st.session_state.sim
+
     st.sidebar.markdown("---")
-    st.sidebar.subheader("Tools")
+    st.sidebar.subheader(
+        "Tools"
+    )
 
     surge_counter = st.sidebar.selectbox(
         "Target Counter",
@@ -1210,7 +1410,7 @@ if data_mode == "Simulation":
         "Trigger Crowd Surge"
     ):
 
-        st.session_state.sim.trigger_surge(
+        sim.trigger_surge(
             surge_counter,
             duration_minutes=15,
             multiplier=6,
@@ -1220,39 +1420,107 @@ if data_mode == "Simulation":
             f"Surge activated at {surge_counter}"
         )
 
+    sim.tick()
 
-# ============================================================
-# INITIAL RENDER
-# ============================================================
-# Live mode: fragment refreshes only dashboard widgets.
-# Camera/WebRTC remains outside the fragment.
-# Streamlit supports automatic fragment reruns for live data updates.
-# Simulation mode uses the traditional full rerun.
-if data_mode == "Live Camera":
+    history = sim.history_df()
 
-    # Initial writes ensure external placeholders are valid fragment targets.
-    metrics_slot.write("")
-    state_slot.write("")
-    actions_slot.write("")
-    forecast_slot.write("")
-
-    live_run_every = (
-        refresh_secs
-        if auto_refresh
-        else None
+    state_df, forecasts, recommendations = (
+        calculate_analytics(
+            history
+        )
     )
 
-    @st.fragment(
-        run_every=live_run_every
+    render_metrics(state_df)
+
+    st.markdown("---")
+
+    render_state_and_actions(
+        state_df,
+        recommendations,
+        prefix="simulation",
     )
-    def live_dashboard():
-        render_dashboard_once()
 
-    live_dashboard()
+    st.markdown("---")
 
-else:
+    st.subheader(
+        "📈 Queue Trajectory & AI Forecast"
+    )
 
-    render_dashboard_once()
+    fig = build_forecast_chart(
+        history,
+        forecasts,
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+    )
+
+    signage_data = {
+        "status": "NORMAL",
+        "message": "✅ PLEASE WAIT IN LINE",
+        "color": "#0a2911",
+    }
+
+    stuck_counters = state_df[
+        state_df[
+            "avg_service_time_min"
+        ]
+        > 5.0
+    ]
+
+    if not stuck_counters.empty:
+
+        signage_data["message"] = (
+            "⚡ EXPRESS LANE OPEN AT "
+            "COUNTER 2 (Max 2 Items)"
+        )
+
+        signage_data["color"] = (
+            "#b58900"
+        )
+
+    else:
+
+        for severity, msg in recommendations:
+
+            if severity == "high":
+
+                signage_data["status"] = "FULL"
+                signage_data["message"] = (
+                    f"🚨 {msg.upper()}"
+                )
+                signage_data["color"] = (
+                    "#4a0404"
+                )
+                break
+
+    try:
+
+        with open(
+            "shared_state.json",
+            "w",
+        ) as file:
+
+            json.dump(
+                signage_data,
+                file,
+            )
+
+    except Exception:
+        pass
+
+    csv_data = history.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    st.sidebar.download_button(
+        label="📥 Download Shift Audit Report",
+        data=csv_data,
+        file_name="queue_performance_report.csv",
+        mime="text/csv",
+        key="simulation_audit_download",
+    )
 
     if auto_refresh:
         time.sleep(refresh_secs)
