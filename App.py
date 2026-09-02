@@ -21,12 +21,8 @@ from recommender import generate_recommendations
 from audio_manager import AudioAnnouncer
 
 
-# ============================================================
-# PAGE / THEME
-# ============================================================
 st.set_page_config(
     page_title="VisionAI Queue Manager",
-    page_icon="👁️",
     layout="wide",
 )
 
@@ -62,9 +58,6 @@ AUDIO_COOLDOWN_SECONDS = 20
 LIVE_ALERT_SUSTAIN_SECONDS = 5
 
 
-# ============================================================
-# SAFE AUDIO
-# ============================================================
 @st.cache_resource
 def get_announcer():
     try:
@@ -82,11 +75,7 @@ if "last_audio_time" not in st.session_state:
 if "browser_last_spoken" not in st.session_state:
     st.session_state.browser_last_spoken = ""
 
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-st.sidebar.title("⚙️ System Controls")
+st.sidebar.title("System Controls")
 
 data_mode = st.sidebar.radio(
     "Operation Mode",
@@ -108,8 +97,6 @@ if st.session_state.current_mode != data_mode:
             "avg_service_time",
         ]
     )
-
-    # Never carry a Simulation alert into Live Camera (or vice versa).
     st.session_state.browser_last_spoken = ""
     st.session_state.live_alert_since = None
     st.session_state.live_alert_active = False
@@ -143,9 +130,6 @@ if "history_df" not in st.session_state:
     )
 
 
-# ============================================================
-# LIGHTWEIGHT GEOMETRY / TRACKER
-# ============================================================
 def point_in_polygon(point, polygon):
     x, y = point
     inside = False
@@ -337,11 +321,11 @@ class CentroidTracker:
 # LIVE CAMERA PROCESSOR
 # ============================================================
 CAMERA_ZONE = [
-    (242, 472),
-    (244, 4),
-    (479, 3),
-    (514, 475),
-    (242, 473),
+    (121, 472),
+    (121, 4),
+    (393, 4),
+    (393, 472),
+    (121, 472),
 ]
 
 
@@ -377,8 +361,6 @@ class BrowserCameraProcessor:
         self.latest_input = None
         self.latest_output = None
 
-        # A person must survive multiple inference passes before being
-        # accepted. This suppresses transient false detections on objects.
         self.candidate_hits = {}
         self.confirmed_ids = set()
         self.confirmed_boxes = {}
@@ -455,7 +437,6 @@ class BrowserCameraProcessor:
             3,
         )
 
-        # Draw only confirmed humans that are actually inside the ROI.
         for box, centroid in zip(
             boxes,
             centroids,
@@ -477,7 +458,6 @@ class BrowserCameraProcessor:
                 3,
             )
 
-            # Clear human label instead of a bare tracker ID.
             cv2.putText(
                 img,
                 "HUMAN",
@@ -524,7 +504,6 @@ class BrowserCameraProcessor:
 
             frame = None
 
-            # Take the newest frame and immediately clear the input slot.
             with self.lock:
                 if self.latest_input is not None:
                     frame = self.latest_input
@@ -570,7 +549,6 @@ class BrowserCameraProcessor:
                     frame_h * frame_w
                 )
 
-                # Explicitly accept ONLY class 0 (person).
                 for box, cls_id, confidence in zip(
                     xyxy,
                     cls_ids,
@@ -611,8 +589,7 @@ class BrowserCameraProcessor:
                         )
                     )
 
-                    # Keep geometry checks deliberately loose.
-                    # YOLO class-0 is the primary human-only filter.
+
                     if box_h < 24:
                         continue
 
@@ -654,9 +631,6 @@ class BrowserCameraProcessor:
                     centroids
                 )
 
-                # ------------------------------------------------
-                # Temporal confirmation: 3 consecutive observations.
-                # ------------------------------------------------
                 visible_ids = set(
                     objects.keys()
                 )
@@ -789,8 +763,6 @@ class BrowserCameraProcessor:
                     else 2.5
                 )
 
-                # Keep an exact bounding-box mapping for confirmed people.
-                # This is more reliable than matching boxes to centroids again.
                 confirmed_box_map = {}
 
                 for object_id, object_centroid in (
@@ -826,7 +798,6 @@ class BrowserCameraProcessor:
 
                 self.confirmed_boxes = confirmed_box_map
 
-                # Only confirmed humans inside the ROI are shown/countable.
                 boxes = []
                 centroids = []
 
@@ -849,7 +820,6 @@ class BrowserCameraProcessor:
                         object_centroid
                     )
 
-                # Make the annotated output from this latest inference.
                 annotated = self._draw_overlay(
                     frame.copy(),
                     zone,
@@ -903,8 +873,7 @@ class BrowserCameraProcessor:
 
         self.frame_counter += 1
 
-        # Keep only the newest frame.
-        # This is the main latency fix: old frames are discarded.
+
         if (
             self.frame_counter
             % self.inference_every_n_frames
@@ -915,9 +884,6 @@ class BrowserCameraProcessor:
 
                 self.latest_input = img.copy()
 
-        # Always return the newest processed frame.
-        # If inference hasn't finished yet, return the raw current frame
-        # with the last known overlay state.
         with self.lock:
 
             latest_output = (
@@ -945,7 +911,6 @@ class BrowserCameraProcessor:
             )
 
         if latest_output is not None:
-            # Re-apply ROI to the current frame so ROI never freezes.
             h, w = img.shape[:2]
             zone = self._scaled_zone(
                 w,
@@ -977,10 +942,6 @@ def get_browser_processor():
         CAMERA_ZONE
     )
 
-
-# ============================================================
-# HEADER
-# ============================================================
 st.title(
     "VisionAI Queue Manager"
 )
@@ -990,10 +951,6 @@ st.markdown(
     "forecasting, and automated load balancing."
 )
 
-
-# ============================================================
-# DATA / UI HELPERS
-# ============================================================
 def calculate_analytics(history):
     state_df = compute_counter_states(
         history
@@ -1125,22 +1082,19 @@ def render_state_and_actions(
 
         elif severity == "medium":
             st.warning(
-                f"⚠️ {msg}"
+                f"{msg}"
             )
 
         elif severity == "warning":
             st.info(
-                f"⏳ {msg}"
+                f"{msg}"
             )
 
         else:
             st.success(
-                f"✅ {msg}"
+                f"{msg}"
             )
 
-    # Browser voice:
-    # Live camera => speak only when the REAL queue is large enough.
-    # Simulation => speak on a sustained high recommendation, useful for demo.
     if voice_enabled and high_alert:
 
         now = time.time()
@@ -1294,8 +1248,11 @@ def build_forecast_chart(
                 y=group[
                     "people_in_queue"
                 ],
-                mode="lines",
+                mode="lines+markers",
                 name=f"{counter} (Actual)",
+                marker=dict(
+                    size=5,
+                ),
                 line=dict(
                     color=colors.get(
                         counter,
@@ -1357,6 +1314,19 @@ def build_forecast_chart(
         annotation_position="top right",
     )
 
+    if history.empty or len(history) < 3:
+        fig.add_annotation(
+            text="Collecting live data for AI forecast…",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.92,
+            showarrow=False,
+            font=dict(
+                size=12,
+            ),
+        )
+
     fig.update_layout(
         height=400,
         xaxis_title="Timeline",
@@ -1373,10 +1343,6 @@ def build_forecast_chart(
 
     return fig
 
-
-# ============================================================
-# MODE: LIVE CAMERA
-# ============================================================
 if data_mode == "Live Camera":
 
     processor = get_browser_processor()
@@ -1460,9 +1426,6 @@ if data_mode == "Live Camera":
         )
     )
     def live_dashboard():
-
-        # IMPORTANT: Live mode must show zero until the browser camera
-        # is actually started. Never reuse old/simulation values.
         camera_is_on = bool(
             rtc_ctx.state.playing
         )
@@ -1478,7 +1441,6 @@ if data_mode == "Live Camera":
                     "avg_service_time": 2.5,
                 }
 
-                # Reset stale detection state while camera is stopped.
                 processor.latest_row = dict(live_row)
                 processor.latest_output = None
                 processor.last_boxes = []
@@ -1489,7 +1451,6 @@ if data_mode == "Live Camera":
                 processor.seen_ids.clear()
                 processor.entry_ts.clear()
 
-            # A stopped camera has no live history.
             st.session_state.history_df = pd.DataFrame(
                 [live_row]
             )
@@ -1502,11 +1463,7 @@ if data_mode == "Live Camera":
 
             live_df = pd.DataFrame(
                 [live_row]
-            )
-
-            # Do not accept the processor's initial placeholder as a
-            # meaningful historical observation. Once the camera is on,
-            # the first actual inference row will replace this state.
+            ),
             if (
                 st.session_state.history_df.empty
                 or (
@@ -1602,7 +1559,7 @@ if data_mode == "Live Camera":
         with live_forecast_placeholder.container():
 
             st.subheader(
-                "📈 Queue Trajectory & AI Forecast"
+                "Queue Trajectory & AI Forecast"
             )
 
             fig = build_forecast_chart(
@@ -1613,11 +1570,14 @@ if data_mode == "Live Camera":
             st.plotly_chart(
                 fig,
                 use_container_width=True,
+                config={
+                    "displayModeBar": False,
+                },
             )
 
         signage_data = {
             "status": "NORMAL",
-            "message": "✅ PLEASE WAIT IN LINE",
+            "message": "PLEASE WAIT IN LINE",
             "color": "#0a2911",
         }
 
@@ -1631,7 +1591,7 @@ if data_mode == "Live Camera":
         if not stuck_counters.empty:
 
             signage_data["message"] = (
-                "⚡ EXPRESS LANE OPEN AT "
+                "EXPRESS LANE OPEN AT "
                 "COUNTER 2 (Max 2 Items)"
             )
 
@@ -1647,7 +1607,7 @@ if data_mode == "Live Camera":
 
                     signage_data["status"] = "FULL"
                     signage_data["message"] = (
-                        f"🚨 {msg.upper()}"
+                        f"{msg.upper()}"
                     )
                     signage_data["color"] = (
                         "#4a0404"
@@ -1674,7 +1634,7 @@ if data_mode == "Live Camera":
         ).encode("utf-8")
 
         st.sidebar.download_button(
-            label="📥 Download Shift Audit Report",
+            label="Download Shift Audit Report",
             data=csv_data,
             file_name="queue_performance_report.csv",
             mime="text/csv",
@@ -1683,14 +1643,8 @@ if data_mode == "Live Camera":
 
     live_dashboard()
 
-
-# ============================================================
-# MODE: SIMULATION
-# ============================================================
 else:
 
-    # No camera component is rendered at all in Simulation Mode.
-    # This keeps the demo dashboard clean and focused.
     if "sim" not in st.session_state:
 
         st.session_state.sim = (
@@ -1761,7 +1715,7 @@ else:
     st.markdown("---")
 
     st.subheader(
-        "📈 Queue Trajectory & AI Forecast"
+        "Queue Trajectory & AI Forecast"
     )
 
     fig = build_forecast_chart(
@@ -1776,7 +1730,7 @@ else:
 
     signage_data = {
         "status": "NORMAL",
-        "message": "✅ PLEASE WAIT IN LINE",
+        "message": "PLEASE WAIT IN LINE",
         "color": "#0a2911",
     }
 
@@ -1790,7 +1744,7 @@ else:
     if not stuck_counters.empty:
 
         signage_data["message"] = (
-            "⚡ EXPRESS LANE OPEN AT "
+            "EXPRESS LANE OPEN AT "
             "COUNTER 2 (Max 2 Items)"
         )
 
@@ -1806,7 +1760,7 @@ else:
 
                 signage_data["status"] = "FULL"
                 signage_data["message"] = (
-                    f"🚨 {msg.upper()}"
+                    f"{msg.upper()}"
                 )
                 signage_data["color"] = (
                     "#4a0404"
@@ -1833,7 +1787,7 @@ else:
     ).encode("utf-8")
 
     st.sidebar.download_button(
-        label="📥 Download Shift Audit Report",
+        label="Download Shift Audit Report",
         data=csv_data,
         file_name="queue_performance_report.csv",
         mime="text/csv",
