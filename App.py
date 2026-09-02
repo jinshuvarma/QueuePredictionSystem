@@ -1,3 +1,4 @@
+
 import json
 import time
 import threading
@@ -655,4 +656,966 @@ class BrowserCameraProcessor:
 
                 with self.lock:
                     self.last_boxes = draw_boxes
-                    self.last_centro
+                    self.last_centroids = draw_points
+                    self.last_ids = draw_ids
+                    self.last_objects = objects
+                    self.confirmed_boxes = confirmed_box_map
+                    self.latest_row = row
+                    self.latest_output = annotated
+
+            except Exception as e:
+                print(f"YOLO worker error: {e}")
+            finally:
+                with self.lock:
+                    self.worker_busy = False
+
+    def process(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        self.frame_counter += 1
+
+        if self.frame_counter % self.inference_every_n_frames == 0:
+            with self.lock:
+                # Latest-frame slot: never build a backlog of stale frames.
+                self.latest_input = img.copy()
+
+        with self.lock:
+            latest_output = None if self.latest_output is None else self.latest_output.copy()
+            boxes = list(self.last_boxes)
+            centroids = list(self.last_centroids)
+            track_ids = list(self.last_ids)
+
+        if latest_output is not None:
+            h, w = img.shape[:2]
+            zone = self._scaled_zone(w, h)
+            annotated = self._draw_overlay(img, zone, boxes, centroids, {}, track_ids)
+            return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+
+@st.cache_resource
+def get_browser_processor():
+    return BrowserCameraProcessor(
+        CAMERA_ZONE
+    )
+
+
+                                                              
+        
+                                                              
+st.title(
+    "VisionAI Queue Manager"
+)
+
+st.markdown(
+    "Real-time computer vision queue tracking, "
+    "forecasting, and automated load balancing."
+)
+
+
+                                                              
+                   
+                                                              
+def calculate_analytics(history):
+    state_df = compute_counter_states(
+        history
+    )
+
+    forecasts = forecast_all_counters(
+        history,
+        steps=FORECAST_STEPS,
+    )
+
+    forecast_alerts = {
+        counter: threshold_alert(
+            forecast,
+            CROWD_THRESHOLD,
+        )
+        for counter, forecast
+        in forecasts.items()
+    }
+
+    recommendations = (
+        generate_recommendations(
+            state_df,
+            forecast_alerts,
+        )
+    )
+
+    return (
+        state_df,
+        forecasts,
+        recommendations,
+    )
+
+
+def render_metrics(state_df):
+    col1, col2, col3, col4 = (
+        st.columns(4)
+    )
+
+    total_waiting = (
+        state_df[
+            "people_in_queue"
+        ].sum()
+        if not state_df.empty
+        else 0
+    )
+
+    max_wait = (
+        state_df[
+            "estimated_wait_min"
+        ].max()
+        if not state_df.empty
+        else 0
+    )
+
+    busiest_counter = (
+        state_df.loc[
+            state_df[
+                "estimated_wait_min"
+            ].idxmax()
+        ]["counter_id"]
+        if not state_df.empty
+        else "N/A"
+    )
+
+    col1.metric(
+        "Total People Waiting",
+        total_waiting,
+    )
+
+    col2.metric(
+        "Max Wait Time",
+        f"{max_wait:.1f} min",
+    )
+
+    col3.metric(
+        "Busiest Node",
+        busiest_counter,
+    )
+
+    col4.metric(
+        "System Status",
+        (
+            "CRITICAL"
+            if total_waiting
+            > CROWD_THRESHOLD
+            else "OPTIMAL"
+        ),
+    )
+
+
+def render_state_and_actions(
+    state_df,
+    recommendations,
+    prefix,
+    voice_enabled=False,
+    actual_queue_count=None,
+    require_real_queue_threshold=False,
+):
+    st.subheader("Live State Estimation")
+
+    display_df = state_df.rename(
+        columns={
+            "counter_id": "Node",
+            "people_in_queue": "Queue Len",
+            "arrival_rate_per_min": "Arrivals/m",
+            "avg_service_time_min": "Service(m)",
+            "estimated_wait_min": "Est. Wait(m)",
+        }
+    )
+
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader("Actions needs to be perform")
+
+    high_alert = None
+
+    for severity, msg in recommendations:
+
+        if severity == "high":
+            st.error(
+                f"ACTION REQUIRED: {msg}"
+            )
+            if high_alert is None:
+                high_alert = msg
+
+        elif severity == "medium":
+            st.warning(
+                f"{msg}"
+            )
+
+        elif severity == "warning":
+            st.info(
+                f"{msg}"
+            )
+
+        else:
+            st.success(
+                f"{msg}"
+            )
+
+                    
+                                                                    
+                                                                              
+    if voice_enabled and high_alert:
+
+        now = time.time()
+
+        if require_real_queue_threshold:
+            alert_condition = (
+                actual_queue_count is not None
+                and actual_queue_count >= CROWD_THRESHOLD
+            )
+        else:
+            alert_condition = True
+
+        if alert_condition:
+
+            if st.session_state.live_alert_since is None:
+                st.session_state.live_alert_since = now
+
+            sustained_for = (
+                now
+                - st.session_state.live_alert_since
+            )
+
+            if sustained_for >= LIVE_ALERT_SUSTAIN_SECONDS:
+
+                clean_msg = (
+                    high_alert
+                    .split(" — ")[0]
+                    .replace(
+                        "min",
+                        "minutes",
+                    )
+                )
+
+                last_spoken_time = (
+                    st.session_state.last_audio_time.timestamp()
+                    if st.session_state.last_audio_time != datetime.min
+                    else 0
+                )
+
+                cooldown_ok = (
+                    now - last_spoken_time
+                    >= AUDIO_COOLDOWN_SECONDS
+                )
+
+                                                                    
+                if (
+                    (
+                        clean_msg
+                        != st.session_state.browser_last_spoken
+                    )
+                    or cooldown_ok
+                ):
+
+                    components.html(
+                        f"""
+                        <script>
+                        (() => {{
+                            const text = {json.dumps(
+                                "Attention please. "
+                                + clean_msg
+                            )};
+
+                            try {{
+                                window.speechSynthesis.cancel();
+                                const u =
+                                    new SpeechSynthesisUtterance(text);
+                                u.rate = 0.95;
+                                u.pitch = 1.0;
+                                u.volume = 1.0;
+                                window.speechSynthesis.speak(u);
+                            }} catch (e) {{
+                                console.log(e);
+                            }}
+                        }})();
+                        </script>
+                        """,
+                        height=1,
+                    )
+
+                    st.session_state.browser_last_spoken = clean_msg
+                    st.session_state.last_audio_time = datetime.now()
+
+        else:
+            st.session_state.live_alert_since = None
+
+    else:
+        st.session_state.live_alert_since = None
+        st.session_state.live_alert_active = False
+        st.session_state.browser_last_spoken = ""
+
+    with st.expander(
+        "Voice Alert",
+        expanded=False,
+    ):
+        if st.button(
+            "Test Voice",
+            key=f"{prefix}_voice_test",
+        ):
+            browser_speak(
+                "VisionAI voice alert system is working."
+            )
+
+
+
+def build_forecast_chart(
+    history,
+    forecasts,
+):
+
+    fig = go.Figure()
+
+    colors = {
+        "Counter 1": "#00F0FF",
+        "Counter 2": "#FF0055",
+        "Counter 3": "#00FF66",
+    }
+
+    for counter in COUNTERS:
+
+        group = (
+            history[
+                history[
+                    "counter_id"
+                ]
+                == counter
+            ]
+            .sort_values(
+                "timestamp"
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=group[
+                    "timestamp"
+                ],
+                y=group[
+                    "people_in_queue"
+                ],
+                mode="lines+markers",
+                name=f"{counter} (Actual)",
+                marker=dict(
+                    size=5,
+                ),
+                line=dict(
+                    color=colors.get(
+                        counter,
+                        "#FFF",
+                    ),
+                    width=2,
+                ),
+            )
+        )
+
+        if counter in forecasts:
+
+            last_ts = (
+                group[
+                    "timestamp"
+                ].iloc[-1]
+                if not group.empty
+                else pd.Timestamp.now()
+            )
+
+            future_ts = [
+                last_ts
+                + pd.Timedelta(
+                    minutes=i
+                )
+                for i in range(
+                    1,
+                    FORECAST_STEPS + 1,
+                )
+            ]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=future_ts,
+                    y=forecasts[
+                        counter
+                    ],
+                    mode="lines",
+                    name=f"{counter} (Forecast)",
+                    line=dict(
+                        color=colors.get(
+                            counter,
+                            "#FFF",
+                        ),
+                        dash="dot",
+                        width=2,
+                    ),
+                )
+            )
+
+    fig.add_hline(
+        y=CROWD_THRESHOLD,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=(
+            f"Critical Threshold "
+            f"({CROWD_THRESHOLD})"
+        ),
+        annotation_position="top right",
+    )
+
+                                                                  
+                                                                       
+    if history.empty or len(history) < 3:
+        fig.add_annotation(
+            text="Collecting live data for AI forecast…",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.92,
+            showarrow=False,
+            font=dict(
+                size=12,
+            ),
+        )
+
+    fig.update_layout(
+        height=400,
+        xaxis_title="Timeline",
+        yaxis_title="People in Queue",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="white"),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+        ),
+    )
+
+    return fig
+
+
+                                                              
+                   
+                                                              
+if data_mode == "Live Camera":
+
+    processor = get_browser_processor()
+
+    st.caption(
+        "Click START and allow camera permission. Only confirmed humans inside the Queue ROI are counted."
+    )
+
+    c_left, c_right = st.columns(
+        [1.2, 1],
+        gap="large",
+    )
+
+    with c_left:
+
+        st.subheader(
+            "Camera"
+        )
+
+        rtc_ctx = webrtc_streamer(
+            key="visionai-live-camera-v4",
+            mode=WebRtcMode.SENDRECV,
+            video_frame_callback=processor.process,
+            media_stream_constraints={
+                "video": {
+                    "width": {
+                        "ideal": 640,
+                        "max": 640,
+                    },
+                    "height": {
+                        "ideal": 360,
+                        "max": 360,
+                    },
+                    "frameRate": {
+                        "ideal": 15,
+                        "max": 15,
+                    },
+                },
+                "audio": False,
+            },
+            async_processing=True,
+            rtc_configuration={
+                "iceServers": [
+                    {
+                        "urls": [
+                            "stun:stun.l.google.com:19302"
+                        ]
+                    }
+                ]
+            },
+        )
+
+        if rtc_ctx.state.playing:
+
+            st.success(
+                "LIVE VISION IS STARTED"
+            )
+
+            if not st.session_state.vision_started_announced:
+                browser_speak(
+                    "Live vision is started."
+                )
+                st.session_state.vision_started_announced = True
+                st.session_state.vision_stopped_announced = False
+
+        else:
+            st.info(
+                "LIVE VISION IS STOPPED"
+            )
+
+            if (
+                st.session_state.vision_started_announced
+                and not st.session_state.vision_stopped_announced
+            ):
+                browser_speak(
+                    "Live vision is stopped."
+                )
+                st.session_state.vision_stopped_announced = True
+                st.session_state.vision_started_announced = False
+
+            st.caption(
+                "Camera is waiting. Click START and allow access."
+            )
+
+    with c_right:
+
+                                                                      
+        live_state_placeholder = st.empty()
+        live_actions_placeholder = st.empty()
+
+    st.markdown("---")
+
+    live_metrics_placeholder = st.empty()
+    live_forecast_placeholder = st.empty()
+
+    @st.fragment(
+        run_every=(
+            refresh_secs
+            if auto_refresh
+            else None
+        )
+    )
+    def live_dashboard():
+
+                                                                      
+                                                                 
+        camera_is_on = bool(
+            rtc_ctx.state.playing
+        )
+
+        if not camera_is_on:
+            with processor.lock:
+                live_row = {
+                    "timestamp": datetime.now(),
+                    "counter_id": "Counter 1",
+                    "people_in_queue": 0,
+                    "arrivals": 0,
+                    "served": 0,
+                    "avg_service_time": 2.5,
+                }
+
+                                                                      
+                processor.latest_row = dict(live_row)
+                processor.latest_output = None
+                processor.last_boxes = []
+                processor.last_centroids = []
+                processor.last_ids = []
+                processor.last_objects = {}
+                processor.confirmed_ids.clear()
+                processor.candidate_hits.clear()
+                processor.seen_ids.clear()
+                processor.entry_ts.clear()
+
+                                                   
+            st.session_state.history_df = pd.DataFrame(
+                [live_row]
+            )
+
+        else:
+            with processor.lock:
+                live_row = dict(
+                    processor.latest_row
+                )
+
+            live_df = pd.DataFrame(
+                [live_row]
+            )
+
+                                                                    
+                                                                       
+                                                                     
+            if (
+                st.session_state.history_df.empty
+                or (
+                    len(st.session_state.history_df) == 1
+                    and float(
+                        st.session_state.history_df.iloc[0][
+                            "people_in_queue"
+                        ]
+                    ) == 0
+                    and float(
+                        st.session_state.history_df.iloc[0][
+                            "arrivals"
+                        ]
+                    ) == 0
+                )
+            ):
+                st.session_state.history_df = live_df
+            else:
+                last_ts = (
+                    st.session_state.history_df[
+                        "timestamp"
+                    ].iloc[-1]
+                )
+
+                if live_row["timestamp"] != last_ts:
+                    st.session_state.history_df = pd.concat(
+                        [
+                            st.session_state.history_df,
+                            live_df,
+                        ],
+                        ignore_index=True,
+                    )
+
+        if len(
+            st.session_state.history_df
+        ) > 500:
+
+            st.session_state.history_df = (
+                st.session_state.history_df.iloc[
+                    -500:
+                ]
+            )
+
+        history = (
+            st.session_state.history_df
+        )
+
+        if not camera_is_on:
+            state_df = pd.DataFrame(
+                [{
+                    "counter_id": "Counter 1",
+                    "people_in_queue": 0,
+                    "arrival_rate_per_min": 0.0,
+                    "avg_service_time_min": 2.5,
+                    "estimated_wait_min": 0.0,
+                }]
+            )
+            forecasts = {
+                "Counter 1": []
+            }
+            recommendations = [
+                (
+                    "normal",
+                    "Camera is off. Start the camera to begin live queue detection.",
+                )
+            ]
+        else:
+            # Forecast/recommendations may use history, but the CURRENT queue
+            # state shown to the evaluator must come directly from the latest
+            # vision frame. This prevents old history from making an empty
+            # camera look like people are still waiting.
+            _, forecasts, recommendations = calculate_analytics(history)
+
+            current_count = int(live_row.get("people_in_queue", 0))
+            current_arrivals = int(live_row.get("arrivals", 0))
+            current_served = int(live_row.get("served", 0))
+            current_service = float(live_row.get("avg_service_time", 2.5))
+
+            if current_count <= 0:
+                recommendations = [(
+                    "normal",
+                    "No human detected in the queue ROI."
+                )]
+                state_df = pd.DataFrame([{
+                    "counter_id": "Counter 1",
+                    "people_in_queue": 0,
+                    "arrival_rate_per_min": 0.0,
+                    "avg_service_time_min": 2.5,
+                    "estimated_wait_min": 0.0,
+                }])
+            else:
+                state_df = pd.DataFrame([{
+                    "counter_id": "Counter 1",
+                    "people_in_queue": current_count,
+                    "arrival_rate_per_min": float(current_arrivals),
+                    "avg_service_time_min": current_service,
+                    "estimated_wait_min": current_count * current_service,
+                }])
+
+        with live_metrics_placeholder.container():
+            render_metrics(state_df)
+
+        with live_state_placeholder.container():
+            actual_queue_count = int(
+                state_df["people_in_queue"].sum()
+                if not state_df.empty
+                else 0
+            )
+
+            render_state_and_actions(
+                state_df,
+                recommendations,
+                prefix="live",
+                voice_enabled=True,
+                actual_queue_count=actual_queue_count,
+                require_real_queue_threshold=True,
+            )
+
+        with live_forecast_placeholder.container():
+
+            st.subheader(
+                "Queue Trajectory & AI Forecast"
+            )
+
+            fig = build_forecast_chart(
+                history,
+                forecasts,
+            )
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={
+                    "displayModeBar": False,
+                },
+            )
+
+        signage_data = {
+            "status": "NORMAL",
+            "message": "PLEASE WAIT IN LINE",
+            "color": "#0a2911",
+        }
+
+        stuck_counters = state_df[
+            state_df[
+                "avg_service_time_min"
+            ]
+            > 5.0
+        ]
+
+        if not stuck_counters.empty:
+
+            signage_data["message"] = (
+                "EXPRESS LANE OPEN AT "
+                "COUNTER 2 (Max 2 Items)"
+            )
+
+            signage_data["color"] = (
+                "#b58900"
+            )
+
+        else:
+
+            for severity, msg in recommendations:
+
+                if severity == "high":
+
+                    signage_data["status"] = "FULL"
+                    signage_data["message"] = (
+                        f"{msg.upper()}"
+                    )
+                    signage_data["color"] = (
+                        "#4a0404"
+                    )
+                    break
+
+        try:
+
+            with open(
+                "shared_state.json",
+                "w",
+            ) as file:
+
+                json.dump(
+                    signage_data,
+                    file,
+                )
+
+        except Exception:
+            pass
+
+        csv_data = history.to_csv(
+            index=False
+        ).encode("utf-8")
+
+        st.sidebar.download_button(
+            label="Download Shift Audit Report",
+            data=csv_data,
+            file_name="queue_performance_report.csv",
+            mime="text/csv",
+            key="live_audit_download",
+        )
+
+    live_dashboard()
+
+
+                                                              
+                  
+                                                              
+else:
+
+                                                                
+                                                      
+    if "sim" not in st.session_state:
+
+        st.session_state.sim = (
+            QueueSimulator(
+                COUNTERS,
+                seed=42,
+            )
+        )
+
+        for _ in range(10):
+            st.session_state.sim.tick()
+
+    sim = st.session_state.sim
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader(
+        "Tools"
+    )
+
+    surge_counter = st.sidebar.selectbox(
+        "Target Counter",
+        COUNTERS,
+    )
+
+    if st.sidebar.button(
+        "Trigger Crowd Surge"
+    ):
+
+        sim.trigger_surge(
+            surge_counter,
+            duration_minutes=15,
+            multiplier=6,
+        )
+
+        st.sidebar.success(
+            f"Surge activated at {surge_counter}"
+        )
+
+    sim.tick()
+
+    history = sim.history_df()
+
+    state_df, forecasts, recommendations = (
+        calculate_analytics(
+            history
+        )
+    )
+
+    render_metrics(state_df)
+
+    st.markdown("---")
+
+    simulation_queue_count = int(
+        state_df["people_in_queue"].sum()
+        if not state_df.empty
+        else 0
+    )
+
+    render_state_and_actions(
+        state_df,
+        recommendations,
+        prefix="simulation",
+        voice_enabled=True,
+        actual_queue_count=simulation_queue_count,
+        require_real_queue_threshold=False,
+    )
+
+    st.markdown("---")
+
+    st.subheader(
+        "Queue Trajectory & AI Forecast"
+    )
+
+    fig = build_forecast_chart(
+        history,
+        forecasts,
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+    )
+
+    signage_data = {
+        "status": "NORMAL",
+        "message": "PLEASE WAIT IN LINE",
+        "color": "#0a2911",
+    }
+
+    stuck_counters = state_df[
+        state_df[
+            "avg_service_time_min"
+        ]
+        > 5.0
+    ]
+
+    if not stuck_counters.empty:
+
+        signage_data["message"] = (
+            "EXPRESS LANE OPEN AT "
+            "COUNTER 2 (Max 2 Items)"
+        )
+
+        signage_data["color"] = (
+            "#b58900"
+        )
+
+    else:
+
+        for severity, msg in recommendations:
+
+            if severity == "high":
+
+                signage_data["status"] = "FULL"
+                signage_data["message"] = (
+                    f"{msg.upper()}"
+                )
+                signage_data["color"] = (
+                    "#4a0404"
+                )
+                break
+
+    try:
+
+        with open(
+            "shared_state.json",
+            "w",
+        ) as file:
+
+            json.dump(
+                signage_data,
+                file,
+            )
+
+    except Exception:
+        pass
+
+    csv_data = history.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    st.sidebar.download_button(
+        label="Download Shift Audit Report",
+        data=csv_data,
+        file_name="queue_performance_report.csv",
+        mime="text/csv",
+        key="simulation_audit_download",
+    )
+
+    if auto_refresh:
+        time.sleep(refresh_secs)
+        st.rerun()
