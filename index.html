@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <style>
+        body { font-family: system-ui; background: #121212; color: white; padding: 20px; }
+        .grid { display: flex; gap: 20px; }
+        .video-box { border: 2px solid #333; width: 640px; height: 480px; }
+        .stats-box { background: #1e1e1e; padding: 20px; border-radius: 8px; width: 300px; }
+    </style>
+</head>
+<body>
+    <h2>Queue Prediction Dashboard</h2>
+    <div class="grid">
+        <!-- The browser natively handles the MJPEG stream here -->
+        <img src="http://localhost:8000/video_feed" class="video-box" alt="Live Camera">
+        
+        <div class="stats-box">
+            <h3>Counter Status</h3>
+            <p>Queue Length: <strong id="q-len">0</strong></p>
+            <p>Wait Time: <strong id="w-time">0</strong> min</p>
+            <p>Arrivals: <strong id="arr">0</strong></p>
+        </div>
+    </div>
+
+    <script>
+        // Poll the JSON endpoint every second for fresh metrics
+        setInterval(async () => {
+            try {
+                let res = await fetch("http://localhost:8000/api/stats");
+                let data = await res.json();
+                document.getElementById("q-len").innerText = data.people_in_queue || 0;
+                document.getElementById("arr").innerText = data.arrivals || 0;
+                // Add your Little's Law math here for wait time
+            } catch (e) {
+                console.error("Backend disconnected");
+            }
+        }, 1000);
+    </script>
+</body>
+</html>
