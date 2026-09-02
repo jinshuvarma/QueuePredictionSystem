@@ -7,6 +7,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
@@ -76,6 +77,9 @@ announcer = get_announcer()
 
 if "last_audio_time" not in st.session_state:
     st.session_state.last_audio_time = datetime.min
+
+if "browser_last_spoken" not in st.session_state:
+    st.session_state.browser_last_spoken = ""
 
 
 # ============================================================
@@ -963,7 +967,7 @@ def render_dashboard_once():
         )
 
     # -----------------------------------------------
-    # Recommendations + audio
+    # Recommendations + browser voice alerts
     # -----------------------------------------------
     with actions_slot.container():
 
@@ -973,13 +977,7 @@ def render_dashboard_once():
 
         current_time = datetime.now()
 
-        should_speak = (
-            (
-                current_time
-                - st.session_state.last_audio_time
-            ).total_seconds()
-            > AUDIO_COOLDOWN_SECONDS
-        )
+        high_alert_message = None
 
         for severity, msg in recommendations:
 
@@ -989,35 +987,8 @@ def render_dashboard_once():
                     f"ACTION REQUIRED: {msg}"
                 )
 
-                if (
-                    should_speak
-                    and announcer is not None
-                ):
-
-                    clean_msg = (
-                        msg.split(" — ")[0]
-                        .replace(
-                            "min",
-                            "minutes",
-                        )
-                    )
-
-                    try:
-                        announcer.announce(
-                            "Attention please. "
-                            + clean_msg
-                        )
-                    except Exception as e:
-                        print(
-                            "Audio announcement skipped:",
-                            e,
-                        )
-
-                    st.session_state.last_audio_time = (
-                        current_time
-                    )
-
-                    should_speak = False
+                if high_alert_message is None:
+                    high_alert_message = msg
 
             elif severity == "medium":
 
@@ -1035,6 +1006,78 @@ def render_dashboard_once():
 
                 st.success(
                     f"✅ {msg}"
+                )
+
+        # pyttsx3 speaks on the Streamlit Cloud server, not on the
+        # evaluator's laptop. Use the browser's SpeechSynthesis API instead.
+        if high_alert_message:
+
+            clean_msg = (
+                high_alert_message
+                .split(" — ")[0]
+                .replace("min", "minutes")
+            )
+
+            # Speak only when the alert message changes.
+            # The dashboard fragment can rerun every second without
+            # repeating the same alert continuously.
+            if (
+                clean_msg
+                != st.session_state.browser_last_spoken
+            ):
+                components.html(
+                    f"""
+                    <script>
+                    (function() {{
+                        const message = {json.dumps(
+                            "Attention please. " + clean_msg
+                        )};
+
+                        try {{
+                            window.speechSynthesis.cancel();
+
+                            const utterance =
+                                new SpeechSynthesisUtterance(message);
+
+                            utterance.rate = 0.95;
+                            utterance.pitch = 1.0;
+                            utterance.volume = 1.0;
+
+                            window.speechSynthesis.speak(utterance);
+                        }} catch (e) {{
+                            console.log("Browser voice unavailable:", e);
+                        }}
+                    }})();
+                    </script>
+                    """,
+                    height=1,
+                )
+
+                st.session_state.browser_last_spoken = clean_msg
+                st.session_state.last_audio_time = current_time
+
+        # Helpful one-click test for the evaluator/browser.
+        with st.expander("🔊 Voice Alert", expanded=False):
+            st.write(
+                "Use this once to verify that browser voice alerts are enabled."
+            )
+            if st.button(
+                "Test Voice",
+                key="test_voice_button",
+            ):
+                components.html(
+                    """
+                    <script>
+                    window.speechSynthesis.cancel();
+                    const u = new SpeechSynthesisUtterance(
+                        "VisionAI voice alert system is working."
+                    );
+                    u.rate = 0.95;
+                    u.volume = 1.0;
+                    window.speechSynthesis.speak(u);
+                    </script>
+                    """,
+                    height=1,
                 )
 
     # -----------------------------------------------
